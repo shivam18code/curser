@@ -31,6 +31,20 @@ Log markers after fix: `bootstrapping Create`, `Switched endpoint to Create POST
 
 ---
 
+## Troubleshooting: groups not visible after Add/Remove until manual aggregation
+
+**Symptom:** Provisioning succeeds, but Identity Cube Hoop **groups** stay stale until you run Single Account Aggregation.
+
+**Cause:** Modify endpoints previously had no response mapping, and AfterProvisioning only patched Enable/Disable `status` — Link `groups` was never refreshed.
+
+**Fix:**
+1. Add response attribute mapping (`groups`, `status`, …) on Add/Remove/Enable/Disable (and Create).
+2. Import updated `Amlak-Rule-Hoop-AfterProvisioningRule` so it runs `getObject` after successful Modify and updates the Link.
+
+Full guide: [`Hoop-Groups-Refresh-After-Provisioning.md`](./Hoop-Groups-Refresh-After-Provisioning.md)
+
+---
+
 ## 0. Prerequisites
 
 | # | Check | Expected |
@@ -38,6 +52,8 @@ Log markers after fix: `bootstrapping Create`, `Switched endpoint to Create POST
 | P-01 | Application `Hoop` exists in IIQ | Type Web Services, base URL STG |
 | P-02 | OAuth credentials valid | Test Connection succeeds |
 | P-03 | Rule `Amlak-Rule-BeforeRule-Hoop` imported and attached | Add / Remove / Disable / Enable endpoints |
+| P-03b | Rule `Amlak-Rule-Hoop-AfterProvisioningRule` imported | Application After Provisioning Rule |
+| P-03c | Add/Remove/Enable/Disable have response mapping | `groups`/`status`/… mapped; root `$` |
 | P-04 | `throwProvBeforeRuleException = true` | BeforeRule failures abort provisioning |
 | P-05 | `fixedPlanMultivaluedAttribute = true` | `$plan.groups$` expands as JSON array |
 | P-06 | `isGetObjectRequiredForPTA = true` | Get Object runs for plan evaluation |
@@ -191,8 +207,8 @@ Log markers after fix: `bootstrapping Create`, `Switched endpoint to Create POST
 | **Priority** | P0 |
 | **Endpoint** | Add Entitlement (`uniqueNameForEndPoint`: **Add Entitilement**) → PUT + BeforeRule |
 | **Precondition** | **U-ACTIVE**: `status=active`, groups include `G-A` only |
-| **Steps** | 1. Request Add Entitlement `G-B` for **U-ACTIVE**. 2. Check IIQ provisioning success. 3. GET Hoop user. 4. Check logs for ADD + `Preserving existing status`. |
-| **Expected** | Groups = `G-A` ∪ `G-B` (both present). Status remains `active`. `finalBody` includes email, name, status, full groups array. Existing group not wiped. |
+| **Steps** | 1. Request Add Entitlement `G-B` for **U-ACTIVE**. 2. Check IIQ provisioning success. 3. GET Hoop user. 4. Check logs for ADD + `Preserving existing status`. 5. **Without** manual aggregation, open Identity Cube → Hoop account → confirm groups. |
+| **Expected** | Groups = `G-A` ∪ `G-B`. Status remains `active`. Cube shows updated groups immediately. Log: `Refreshed Link from getObject`. |
 | **Result** | ☐ Pass ☐ Fail ☐ Blocked |
 | **Notes** | |
 
@@ -259,8 +275,8 @@ Log markers after fix: `bootstrapping Create`, `Switched endpoint to Create POST
 | **Priority** | P0 |
 | **Endpoint** | Remove Entitlement → PUT + BeforeRule |
 | **Precondition** | **U-MULTI**: groups `["engineering","ops","finance"]`, status `active` |
-| **Steps** | Remove `ops` only. Verify Hoop + logs (`REMOVE groups`). |
-| **Expected** | Remaining groups `engineering`, `finance`. Status still `active`. Other groups not deleted. |
+| **Steps** | Remove `ops` only. Verify Hoop + logs (`REMOVE groups`). **Do not** run manual aggregation. Refresh Identity Cube and check Hoop groups. |
+| **Expected** | Remaining groups `engineering`, `finance`. Status still `active`. Cube Link groups match **without** Single Account Aggregation. AfterProvisioning log: `Refreshed Link from getObject`. |
 | **Result** | ☐ Pass ☐ Fail ☐ Blocked |
 | **Notes** | |
 
