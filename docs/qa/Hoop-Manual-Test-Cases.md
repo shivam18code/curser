@@ -57,11 +57,13 @@ Use this document for manual QA of aggregation and provisioning against Hoop. Ma
 | Operation | Status in final body | Groups in final body |
 |-----------|----------------------|----------------------|
 | Add Entitlement | **Preserve** current | current ∪ requested |
+| Add Entitlement + user **404** | `active` (bootstrap) | requested only; switches to **POST** `/api/users` |
 | Remove Entitlement | **Preserve** current | current − requested |
 | Disable Account | `inactive` | **Preserve** current |
 | Enable Account | `active` | **Preserve** current |
 
-> Template static `"status":"active"` on Add/Remove must be **ignored** by the BeforeRule.
+> Template static `"status":"active"` on Add/Remove must be **ignored** by the BeforeRule.  
+> If IIQ runs **Modify / Add Entitlement** but Hoop has no user (`GET 404`), the corrected BeforeRule bootstraps **Create**. Remove / Enable / Disable on missing user still fail closed.
 
 ---
 
@@ -216,6 +218,20 @@ Use this document for manual QA of aggregation and provisioning against Hoop. Ma
 
 ---
 
+### TC-ADD-05 — Add Entitlement when Hoop user does not exist (404 bootstrap Create)
+
+| Field | Value |
+|-------|-------|
+| **Priority** | P0 — **regression for Modify + missing target** |
+| **Precondition** | IIQ has (or plans) a Hoop account link / Modify Add Entitlement, but `GET /api/users/{email}` returns **404** `user ... not found`. Native identity must be a real email (not `???`). |
+| **Steps** | 1. Request Add Entitlement for a user missing in Hoop. 2. Check logs for `bootstrapping Create` and `Switched endpoint to Create POST`. 3. Verify Hoop user exists with requested groups and `status=active`. |
+| **Expected** | Provisioning **succeeds**. BeforeRule does **not** throw on 404. User created via `POST /api/users` with `email`, `name`, `status=active`, `groups` = requested. |
+| **Fail if** | Still see `GET failed status=404` RuntimeException (old rule). Or nativeIdentity is `???` / invalid — fix IIQ link email first. |
+| **Result** | ☐ Pass ☐ Fail ☐ Blocked |
+| **Notes** | |
+
+---
+
 ## 4. Remove Entitlement
 
 ### TC-REM-01 — Remove one group from multi-group user
@@ -314,14 +330,27 @@ Use this document for manual QA of aggregation and provisioning against Hoop. Ma
 
 ## 6. BeforeRule failure / fail-closed
 
-### TC-RULE-01 — GET non-200 aborts provisioning
+### TC-RULE-01 — GET 404 on Remove / Enable / Disable still aborts
 
 | Field | Value |
 |-------|-------|
 | **Priority** | P0 — **safety** |
-| **Precondition** | Force GET failure (invalid email in URL, temp bad token, or unknown user path that returns non-200) while keeping `throwProvBeforeRuleException=true` |
-| **Steps** | Trigger Add or Remove Entitlement. Watch IIQ provisioning + logs. |
-| **Expected** | BeforeRule throws; provisioning **fails**. Hoop account groups/status **unchanged** (no wipe). Log shows GET failed status. |
+| **Precondition** | Target email does not exist in Hoop (404). `throwProvBeforeRuleException=true` |
+| **Steps** | Trigger **Remove** or **Disable** or **Enable** (not Add). Watch IIQ provisioning + logs. |
+| **Expected** | BeforeRule throws with clear “does not exist / Create the account first”; provisioning **fails**. No wipe. |
+| **Result** | ☐ Pass ☐ Fail ☐ Blocked |
+| **Notes** | |
+
+---
+
+### TC-RULE-01b — GET non-404 error aborts even on Add
+
+| Field | Value |
+|-------|-------|
+| **Priority** | P0 — **safety** |
+| **Precondition** | Force GET failure other than 404 (e.g. 401/500) |
+| **Steps** | Trigger Add Entitlement. |
+| **Expected** | BeforeRule throws; provisioning fails; no bootstrap Create. |
 | **Result** | ☐ Pass ☐ Fail ☐ Blocked |
 | **Notes** | |
 
@@ -446,7 +475,7 @@ Use this document for manual QA of aggregation and provisioning against Hoop. Ma
 3. TC-AGG-02 → TC-AGG-01 → TC-AGG-03  
 4. TC-CREATE-01  
 5. TC-ADD-01 → TC-REM-01 → TC-DIS-01 → TC-EN-01  
-6. **Regression pack:** TC-ADD-02, TC-REM-02, TC-DIS-02, TC-RULE-01  
+6. **Regression pack:** TC-ADD-02, TC-ADD-05, TC-REM-02, TC-DIS-02, TC-RULE-01, TC-RULE-01b  
 7. Remaining P1/P2 cases  
 8. Record DEF-01 … DEF-05 outcomes  
 
@@ -472,13 +501,13 @@ Use this document for manual QA of aggregation and provisioning against Hoop. Ma
 |-------|-------|------|------|---------|-----|
 | Connectivity & aggregation | 4 | | | | |
 | Create Account | 3 | | | | |
-| Add Entitlement | 4 | | | | |
+| Add Entitlement | 5 | | | | |
 | Remove Entitlement | 4 | | | | |
 | Disable / Enable | 3 | | | | |
-| BeforeRule fail-closed | 3 | | | | |
+| BeforeRule fail-closed | 4 | | | | |
 | Correlation & forms | 3 | | | | |
 | Negative / edge | 3 | | | | |
-| **Total** | **27** | | | | |
+| **Total** | **29** | | | | |
 
 ---
 

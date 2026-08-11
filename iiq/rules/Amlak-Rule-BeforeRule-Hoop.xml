@@ -9,13 +9,17 @@
     (ignores static "status":"active" in entitlement templates)
   - Disable Account: set status inactive; preserve groups
   - Enable Account: set status active; preserve groups
-  - GET current account first; abort on non-200 (fail closed)
+  - GET current account first
+  - Add Entitlement + GET 404: bootstrap Create via POST /api/users
+    (covers IIQ Modify when Hoop user is missing)
+  - Remove/Enable/Disable + GET 404 or other non-200: fail closed
 -->
 <Rule language="beanshell" name="Amlak-Rule-BeforeRule-Hoop" type="WebServiceBeforeOperationRule">
   <Description>
     BeforeOperation rule for Hoop Web Services connector.
     GETs the current account, merges groups for Add/Remove Entitlement,
-    and sets status only for Enable/Disable Account operations.
+    sets status only for Enable/Disable, and bootstraps Create (POST)
+    when Add Entitlement targets a missing Hoop user (404).
   </Description>
   <Signature returnType="Object">
     <Inputs>
@@ -37,7 +41,7 @@
     </Inputs>
     <Returns>
       <Argument name="requestEndPoint">
-        <Description>Updated endpoint with rewritten jsonBody.</Description>
+        <Description>Updated endpoint with rewritten jsonBody (and Create switch on Add+404).</Description>
       </Argument>
     </Returns>
   </Signature>
@@ -54,6 +58,10 @@ import java.util.Map;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Iterator;
+import java.util.List;
+import sailpoint.object.ProvisioningPlan;
+import sailpoint.object.ProvisioningPlan.AccountRequest;
+import sailpoint.object.ProvisioningPlan.AttributeRequest;
 
 Logger log = Logger.getLogger("com.amlak.application.hoop");
 
@@ -66,11 +74,13 @@ boolean isRemove = endpointLower.contains("remove");
 boolean isDisable = endpointLower.contains("disable");
 boolean isEnable = endpointLower.contains("enable");
 // Add Entitlement (including typo "Add Entitilement") = not remove/enable/disable
-boolean isEntitlementOp = !isDisable && !isEnable;
+boolean isAdd = !isRemove && !isDisable && !isEnable;
+boolean isEntitlementOp = isAdd || isRemove;
 
 // ---- 1) Identity from URL (/api/users/$plan.nativeIdentity$) ----
 String urlPath = requestEndPoint.getFullUrl();
 String email = null;
+String usersCollectionUrl = null;
 try {
     String pathOnly = urlPath;
     int q = pathOnly.indexOf('?');
@@ -85,17 +95,53 @@ try {
         pathOnly = pathOnly.substring(0, pathOnly.length() - 1);
     }
 
-    String tail = pathOnly.substring(pathOnly.lastIndexOf('/') + 1);
+    int lastSlash = pathOnly.lastIndexOf('/');
+    String tail = pathOnly.substring(lastSlash + 1);
+    usersCollectionUrl = pathOnly.substring(0, lastSlash);
     email = java.net.URLDecoder.decode(tail, "UTF-8");
     if (email == null || email.trim().length() == 0) {
         throw new RuntimeException("Empty identity in URL: " + urlPath);
     }
+    // Guard against garbage nativeIdentity (IIQ sometimes surfaces as ???)
+    if ("???".equals(email) || email.indexOf('?') >= 0) {
+        throw new RuntimeException("Hoop-BeforeRule invalid nativeIdentity in URL: '" + email
+            + "'. Check IIQ account link nativeIdentity equals Hoop email.");
+    }
+} catch (RuntimeException re) {
+    throw re;
 } catch (Throwable t) {
     log.error("[Hoop-BeforeRule] Could not parse identity from URL: " + urlPath, t);
     throw new RuntimeException("Hoop-BeforeRule could not derive identity from URL", t);
 }
 
 log.info("[Hoop-BeforeRule] identity=" + email + " endpoint=" + endpointName);
+
+// Optional displayName from plan (used when bootstrapping Create on Add+404)
+String planDisplayName = null;
+try {
+    if (provisioningPlan != null) {
+        List accReqs = null;
+        try {
+            accReqs = provisioningPlan.getAccountRequests(application.getName());
+        } catch (Throwable ignore) {}
+        if (accReqs == null || accReqs.isEmpty()) {
+            accReqs = provisioningPlan.getAccountRequests();
+        }
+        if (accReqs != null && !accReqs.isEmpty()) {
+            AccountRequest acct = (AccountRequest) accReqs.get(0);
+            AttributeRequest dnReq = acct.getAttributeRequest("displayName");
+            if (dnReq == null) {
+                dnReq = acct.getAttributeRequest("name");
+            }
+            if (dnReq != null && dnReq.getValue() != null
+                    && String.valueOf(dnReq.getValue()).trim().length() > 0) {
+                planDisplayName = String.valueOf(dnReq.getValue()).trim();
+            }
+        }
+    }
+} catch (Throwable planEx) {
+    log.debug("[Hoop-BeforeRule] Could not read displayName from plan: " + planEx.getMessage());
+}
 
 // ---- 2) Parse incoming jsonBody (groups only; ignore static status on entitlement) ----
 Map incomingWrapper = (Map) requestEndPoint.getBody();
@@ -156,13 +202,16 @@ if (isDisable) {
 }
 // else entitlement op: preserve current status after GET
 
-// ---- 4) GET current Hoop account (fail closed) ----
+// ---- 4) GET current Hoop account ----
+// Add Entitlement + 404 => bootstrap Create (POST /api/users) so Modify-with-missing-target works.
+// Remove / Enable / Disable + 404 => fail closed (cannot modify missing user).
 Map existingHeaders = requestEndPoint.getHeader();
 Object authHeader = (existingHeaders != null) ? existingHeaders.get("Authorization") : null;
 
 JSONArray currentGroups = new JSONArray();
-String currentName = email;
+String currentName = (planDisplayName != null) ? planDisplayName : email;
 String currentStatus = null;
+boolean bootstrapCreate = false;
 
 CloseableHttpClient client = HttpClients.createDefault();
 CloseableHttpResponse resp = null;
@@ -178,29 +227,41 @@ try {
     String respBody = (resp.getEntity() != null) ? EntityUtils.toString(resp.getEntity()) : "";
     log.debug("[Hoop-BeforeRule] GET status=" + status + " body=" + respBody);
 
-    if (status != 200) {
+    if (status == 404) {
+        if (isAdd) {
+            bootstrapCreate = true;
+            currentGroups = new JSONArray();
+            currentStatus = null;
+            log.warn("[Hoop-BeforeRule] User not found (404) on Add Entitlement - bootstrapping Create for identity="
+                + email);
+        } else {
+            throw new RuntimeException("Hoop-BeforeRule GET failed status=404 body=" + respBody
+                + " — Hoop user '" + email + "' does not exist. Create the account first "
+                + "(or use Add Entitlement which can bootstrap Create).");
+        }
+    } else if (status != 200) {
         throw new RuntimeException("Hoop-BeforeRule GET failed status=" + status + " body=" + respBody);
-    }
+    } else {
+        JSONObject currentUserJson = new JSONObject(respBody);
 
-    JSONObject currentUserJson = new JSONObject(respBody);
+        String returnedEmail = currentUserJson.has("email") && !currentUserJson.isNull("email")
+            ? currentUserJson.getString("email") : null;
+        if (returnedEmail != null && !returnedEmail.equalsIgnoreCase(email)) {
+            throw new RuntimeException("Hoop-BeforeRule GET identity mismatch: returned="
+                + returnedEmail + " expected=" + email);
+        }
 
-    String returnedEmail = currentUserJson.has("email") && !currentUserJson.isNull("email")
-        ? currentUserJson.getString("email") : null;
-    if (returnedEmail != null && !returnedEmail.equalsIgnoreCase(email)) {
-        throw new RuntimeException("Hoop-BeforeRule GET identity mismatch: returned="
-            + returnedEmail + " expected=" + email);
-    }
-
-    if (currentUserJson.has("groups") && !currentUserJson.isNull("groups")) {
-        currentGroups = currentUserJson.getJSONArray("groups");
-    }
-    if (currentUserJson.has("name") && !currentUserJson.isNull("name")
-            && currentUserJson.getString("name").trim().length() > 0) {
-        currentName = currentUserJson.getString("name");
-    }
-    if (currentUserJson.has("status") && !currentUserJson.isNull("status")
-            && currentUserJson.getString("status").trim().length() > 0) {
-        currentStatus = currentUserJson.getString("status");
+        if (currentUserJson.has("groups") && !currentUserJson.isNull("groups")) {
+            currentGroups = currentUserJson.getJSONArray("groups");
+        }
+        if (currentUserJson.has("name") && !currentUserJson.isNull("name")
+                && currentUserJson.getString("name").trim().length() > 0) {
+            currentName = currentUserJson.getString("name");
+        }
+        if (currentUserJson.has("status") && !currentUserJson.isNull("status")
+                && currentUserJson.getString("status").trim().length() > 0) {
+            currentStatus = currentUserJson.getString("status");
+        }
     }
 } finally {
     if (resp != null) {
@@ -210,8 +271,13 @@ try {
 }
 
 if (resolvedStatus == null) {
-    resolvedStatus = (currentStatus != null) ? currentStatus : "active";
-    log.info("[Hoop-BeforeRule] Preserving existing status=" + resolvedStatus);
+    if (bootstrapCreate) {
+        resolvedStatus = "active";
+        log.info("[Hoop-BeforeRule] Bootstrap Create - status=active");
+    } else {
+        resolvedStatus = (currentStatus != null) ? currentStatus : "active";
+        log.info("[Hoop-BeforeRule] Preserving existing status=" + resolvedStatus);
+    }
 } else {
     log.info("[Hoop-BeforeRule] Setting status from enable/disable=" + resolvedStatus);
 }
@@ -240,13 +306,18 @@ if (isEntitlementOp && requestedGroups.length() > 0) {
     log.info("[Hoop-BeforeRule] Enable/Disable - preserving groups unchanged");
 }
 
+if (bootstrapCreate && mergedSet.isEmpty()) {
+    throw new RuntimeException("Hoop-BeforeRule cannot bootstrap Create for '" + email
+        + "': Add Entitlement had no groups in plan. Create Account first, or include a group.");
+}
+
 JSONArray finalGroups = new JSONArray();
 Iterator mi = mergedSet.iterator();
 while (mi.hasNext()) {
     finalGroups.put(mi.next());
 }
 
-// ---- 6) Rewrite body ----
+// ---- 6) Rewrite body (+ switch Add+404 to POST Create) ----
 JSONObject fullBody = new JSONObject();
 fullBody.put("email", email);
 fullBody.put("name", currentName);
@@ -261,9 +332,17 @@ wrapperBody.put("jsonBody", finalBodyStr);
 wrapperBody.put("bodyFormat", "raw");
 requestEndPoint.setBody(wrapperBody);
 
+if (bootstrapCreate) {
+    // PUT /api/users/{email} cannot create; switch to POST /api/users
+    requestEndPoint.setFullUrl(usersCollectionUrl);
+    requestEndPoint.setHttpMethodType("POST");
+    log.info("[Hoop-BeforeRule] Switched endpoint to Create POST url=" + usersCollectionUrl);
+}
+
 log.info("[Amlak-Rule-BeforeRule-Hoop] EXIT endpoint=" + endpointName
-    + " email=" + email + " status=" + resolvedStatus + " groups=" + finalGroups.toString());
+    + " email=" + email + " status=" + resolvedStatus + " groups=" + finalGroups.toString()
+    + " bootstrapCreate=" + bootstrapCreate);
 
 return requestEndPoint;
-  ]]></Source>
+]]></Source>
 </Rule>
