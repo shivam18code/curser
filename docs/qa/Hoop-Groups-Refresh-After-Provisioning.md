@@ -67,6 +67,21 @@ Repo files:
 
 If logs show getObject failure, fix Get Object endpoint / OAuth first (manual Single Account Aggregation would also fail).
 
+## Get Object URL token (important)
+
+| Operation | Context URL identity token |
+|-----------|----------------------------|
+| Get Object / Single Account Aggregation | **`$getObject.nativeIdentity$`** |
+| Create / Add / Remove / Enable / Disable | **`$plan.nativeIdentity$`** |
+
+Do **not** put `$plan.nativeIdentity$` on Get Object. Manual aggregation and AfterProvisioning `connector.getObject()` use the **`$getObject`** map. With `$plan` there, Get Object can fail or hit the wrong user, so Link groups stay stale.
+
+Example:
+```text
+Get Object → GET /api/users/$getObject.nativeIdentity$
+Add Entitlement → PUT /api/users/$plan.nativeIdentity$
+```
+
 ## What not to rely on
 
 | Setting | Why it does not fix this |
@@ -74,6 +89,7 @@ If logs show getObject failure, fix Get Object endpoint / OAuth first (manual Si
 | `isGetObjectRequiredForPTA=true` | Used for plan evaluation **before** provisioning, not Link refresh after |
 | Manual aggregation forever | Workaround only |
 | BeforeOperation rule | Rewrites outbound PUT body; does not update IIQ Link |
+| `$plan.nativeIdentity$` on Get Object | Wrong placeholder for getObject / Single Account Aggregation |
 
 ## Quick test cases
 

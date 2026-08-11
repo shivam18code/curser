@@ -460,7 +460,9 @@
                   </Map>
                 </value>
               </entry>
-              <entry key="contextUrl" value="/api/users/$plan.nativeIdentity$"/>
+              <!-- Get Object must use $getObject.nativeIdentity$ (NOT $plan.*)
+                   $plan is for provisioning; Single Account Aggregation / connector.getObject() use $getObject -->
+              <entry key="contextUrl" value="/api/users/$getObject.nativeIdentity$"/>
               <entry key="curlCommand"/>
               <entry key="curlEnabled">
                 <value>
