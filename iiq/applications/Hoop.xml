@@ -460,7 +460,7 @@
                   </Map>
                 </value>
               </entry>
-              <!-- Match Bitbucket style: $getobject.nativeIdentity$ (NOT $plan.*) -->
+              <!-- Bitbucket-style token (lowercase). Do NOT use $plan.nativeIdentity$ here. -->
               <entry key="contextUrl" value="/api/users/$getobject.nativeIdentity$"/>
               <entry key="curlCommand"/>
               <entry key="curlEnabled">
