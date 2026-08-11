@@ -460,9 +460,8 @@
                   </Map>
                 </value>
               </entry>
-              <!-- Get Object must use $getObject.nativeIdentity$ (NOT $plan.*)
-                   $plan is for provisioning; Single Account Aggregation / connector.getObject() use $getObject -->
-              <entry key="contextUrl" value="/api/users/$getObject.nativeIdentity$"/>
+              <!-- Match Bitbucket style: $getobject.nativeIdentity$ (NOT $plan.*) -->
+              <entry key="contextUrl" value="/api/users/$getobject.nativeIdentity$"/>
               <entry key="curlCommand"/>
               <entry key="curlEnabled">
                 <value>
@@ -485,6 +484,9 @@
                 </value>
               </entry>
               <entry key="parentEndpointName"/>
+              <!-- Like Bitbucket Get Object child: groups MUST be mapped here.
+                   Hoop returns groups on the same user JSON, so one endpoint is enough.
+                   Add/Remove can stay without response mapping (same as Bitbucket). -->
               <entry key="resMappingObj">
                 <value>
                   <Map>
