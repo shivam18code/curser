@@ -92,14 +92,24 @@ Hoop’s Before Rule (merge groups/status) is for outbound PUT body — also not
 
 ---
 
-## Practical conclusion from docs
+## 7) IIQ community: Get Object does **not** update Link by itself
 
-You are **not** missing a hidden Application XML “auto Get Object after Add Entitlement” setting in the official IIQ Web Services docs.
+Relevant IIQ thread (8.3):  
+[WebServices connector GetObject operation does not update Link](https://developer.sailpoint.com/discuss/t/webservices-connector-getobject-operation-does-not-update-link/17108)
 
-You **were** missing the correct Get Object placeholder (fixed).  
-To see groups after Add/Remove without manual aggregation, you still need either:
+SailPoint-side explanation there:
 
-1. AfterProvisioning (or similar) that calls getObject / updates Link, or  
-2. Add/Remove response that returns full user + response mapping (only if Hoop PUT returns the user JSON)
+- Get Object retrieves a ResourceObject for verification / further processing
+- **Get Object alone does not update Link / identity attributes**
+- To update the account on the identity (what you see on the cube), process via **Aggregator** (full or single-account aggregation UI/task)
 
-That matches SailPoint’s documented behavior and your working Bitbucket pattern.
+That matches your Hoop symptom: Add/Remove succeeds on target, but cube groups stay old until you manually aggregate.
+
+So even with a correct Get Object operation in the Application XML, **IIQ will not necessarily write new `groups` onto the Link after Modify**. AfterProvisioning (or an aggregation) is still required to update what you see.
+
+---
+
+## PDF note
+
+Local path `c:\Users\shivam.gore\Downloads\8.2 SailPoint Web Services Connector Guide.pdf` is not readable from this cloud agent. Upload/attach that PDF into the workspace or chat to search it line-by-line.
+
