@@ -194,7 +194,7 @@
                   <Map>
                     <entry key="bodyFormData"/>
                     <entry key="bodyFormat" value="raw"/>
-                    <entry key="jsonBody" value="{&#xD;&#xA;  &quot;email&quot;: &quot;$plan.nativeIdentity$&quot;,&#xD;&#xA;  &quot;name&quot;: &quot;$plan.displayName$&quot;,&#xD;&#xA;  &quot;status&quot;: &quot;active&quot;&#xD;&#xA;}"/>
+                    <entry key="jsonBody" value="{&#xD;&#xA;  &quot;email&quot;: &quot;$plan.email$&quot;,&#xD;&#xA;  &quot;name&quot;: &quot;$plan.displayName$&quot;,&#xD;&#xA;  &quot;status&quot;: &quot;active&quot;&#xD;&#xA;}"/>
                   </Map>
                 </value>
               </entry>
@@ -589,9 +589,31 @@
             <Source>return identity.getFirstname() + " " + identity.getLastname();</Source>
           </Script>
         </Field>
-        <Field displayName="email" name="email" type="string">
+        <Field displayName="email" name="email" required="true" type="string">
           <Script>
-            <Source>return identity.getEmail();</Source>
+            <Source><![CDATA[
+              // Prefer primary email; fall back so Create Account always expands email for Hoop API.
+              String email = identity.getEmail();
+              if (email == null || email.trim().length() == 0) {
+                Object mail = identity.getAttribute("mail");
+                if (mail != null) {
+                  email = mail.toString();
+                }
+              }
+              if (email == null || email.trim().length() == 0) {
+                Object upn = identity.getAttribute("userPrincipalName");
+                if (upn != null) {
+                  email = upn.toString();
+                }
+              }
+              if (email == null || email.trim().length() == 0) {
+                String name = identity.getName();
+                if (name != null && name.indexOf("@") > 0) {
+                  email = name;
+                }
+              }
+              return email;
+            ]]></Source>
           </Script>
         </Field>
       </Section>

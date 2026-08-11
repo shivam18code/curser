@@ -46,302 +46,516 @@
     </Returns>
   </Signature>
   <Source><![CDATA[
-import org.apache.log4j.Logger;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClients;
-import org.apache.http.util.EntityUtils;
-import org.json.JSONObject;
-import org.json.JSONArray;
-import java.util.Map;
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import sailpoint.object.Application;
 import sailpoint.object.ProvisioningPlan;
 import sailpoint.object.ProvisioningPlan.AccountRequest;
 import sailpoint.object.ProvisioningPlan.AttributeRequest;
+import sailpoint.object.ProvisioningPlan.ObjectOperation;
+import sailpoint.connector.webservices.EndPoint;
+import sailpoint.connector.webservices.WebServicesClient;
+import sailpoint.tools.Util;
+import sailpoint.tools.GeneralException;
+import connector.common.JsonUtil;
+import sailpoint.tools.ConnectorException;
+import org.apache.log4j.Logger;
 
 Logger log = Logger.getLogger("com.amlak.application.hoop");
 
-String endpointName = requestEndPoint.getUniqueNameForEndPoint();
-String endpointLower = (endpointName != null) ? endpointName.toLowerCase() : "";
+/**
+ * Prefer AttributeRequest email, then Identity email / mail / UPN / name-with-@.
+ */
+private String resolveEmailFromIdentity(AccountRequest accountRequest) {
+  if (accountRequest == null) {
+    return null;
+  }
 
-log.info("[Amlak-Rule-BeforeRule-Hoop] ENTRY endpoint=" + endpointName);
+  List attrReqs = accountRequest.getAttributeRequests();
+  if (attrReqs != null) {
+    for (int i = 0; i < attrReqs.size(); i++) {
+      AttributeRequest ar = (AttributeRequest) attrReqs.get(i);
+      if (ar != null && "email".equalsIgnoreCase(ar.getName()) && ar.getValue() != null) {
+        String v = String.valueOf(ar.getValue()).trim();
+        if (Util.isNotNullOrEmpty(v) && v.indexOf("@") >= 0) {
+          return v;
+        }
+      }
+    }
+  }
 
-boolean isRemove = endpointLower.contains("remove");
-boolean isDisable = endpointLower.contains("disable");
-boolean isEnable = endpointLower.contains("enable");
-// Add Entitlement (including typo "Add Entitilement") = not remove/enable/disable
-boolean isAdd = !isRemove && !isDisable && !isEnable;
-boolean isEntitlementOp = isAdd || isRemove;
+  String ni = accountRequest.getNativeIdentity();
+  if (Util.isNotNullOrEmpty(ni) && ni.indexOf("@") >= 0
+      && !"users".equalsIgnoreCase(ni.trim())
+      && !"api".equalsIgnoreCase(ni.trim())) {
+    return ni.trim();
+  }
 
-// ---- 1) Identity from URL (/api/users/$plan.nativeIdentity$) ----
-String urlPath = requestEndPoint.getFullUrl();
-String email = null;
-String usersCollectionUrl = null;
-try {
-    String pathOnly = urlPath;
-    int q = pathOnly.indexOf('?');
-    if (q >= 0) {
-        pathOnly = pathOnly.substring(0, q);
+  try {
+    if (identity != null) {
+      if (Util.isNotNullOrEmpty(identity.getEmail()) && identity.getEmail().indexOf("@") >= 0) {
+        return identity.getEmail().trim();
+      }
+      Object mail = identity.getAttribute("mail");
+      if (mail != null) {
+        String m = String.valueOf(mail).trim();
+        if (Util.isNotNullOrEmpty(m) && m.indexOf("@") >= 0) {
+          return m;
+        }
+      }
+      Object upn = identity.getAttribute("userPrincipalName");
+      if (upn != null) {
+        String u = String.valueOf(upn).trim();
+        if (Util.isNotNullOrEmpty(u) && u.indexOf("@") >= 0) {
+          return u;
+        }
+      }
+      String idName = identity.getName();
+      if (Util.isNotNullOrEmpty(idName) && idName.indexOf("@") >= 0) {
+        return idName.trim();
+      }
     }
-    int hash = pathOnly.indexOf('#');
-    if (hash >= 0) {
-        pathOnly = pathOnly.substring(0, hash);
-    }
-    while (pathOnly.endsWith("/") && pathOnly.length() > 1) {
-        pathOnly = pathOnly.substring(0, pathOnly.length() - 1);
-    }
+  } catch (Exception ignore) {
+  }
 
-    int lastSlash = pathOnly.lastIndexOf('/');
-    String tail = pathOnly.substring(lastSlash + 1);
-    usersCollectionUrl = pathOnly.substring(0, lastSlash);
-    email = java.net.URLDecoder.decode(tail, "UTF-8");
-    if (email == null || email.trim().length() == 0) {
-        throw new RuntimeException("Empty identity in URL: " + urlPath);
-    }
-    // Guard against garbage nativeIdentity (IIQ sometimes surfaces as ???)
-    if ("???".equals(email) || email.indexOf('?') >= 0) {
-        throw new RuntimeException("Hoop-BeforeRule invalid nativeIdentity in URL: '" + email
-            + "'. Check IIQ account link nativeIdentity equals Hoop email.");
-    }
-} catch (RuntimeException re) {
-    throw re;
-} catch (Throwable t) {
-    log.error("[Hoop-BeforeRule] Could not parse identity from URL: " + urlPath, t);
-    throw new RuntimeException("Hoop-BeforeRule could not derive identity from URL", t);
+  return null;
 }
 
-log.info("[Hoop-BeforeRule] identity=" + email + " endpoint=" + endpointName);
-
-// Optional displayName from plan (used when bootstrapping Create on Add+404)
-String planDisplayName = null;
-try {
-    if (provisioningPlan != null) {
-        List accReqs = null;
-        try {
-            accReqs = provisioningPlan.getAccountRequests(application.getName());
-        } catch (Throwable ignore) {}
-        if (accReqs == null || accReqs.isEmpty()) {
-            accReqs = provisioningPlan.getAccountRequests();
-        }
-        if (accReqs != null && !accReqs.isEmpty()) {
-            AccountRequest acct = (AccountRequest) accReqs.get(0);
-            AttributeRequest dnReq = acct.getAttributeRequest("displayName");
-            if (dnReq == null) {
-                dnReq = acct.getAttributeRequest("name");
-            }
-            if (dnReq != null && dnReq.getValue() != null
-                    && String.valueOf(dnReq.getValue()).trim().length() > 0) {
-                planDisplayName = String.valueOf(dnReq.getValue()).trim();
-            }
-        }
-    }
-} catch (Throwable planEx) {
-    log.debug("[Hoop-BeforeRule] Could not read displayName from plan: " + planEx.getMessage());
+private boolean isLikelyEmail(String value) {
+  return Util.isNotNullOrEmpty(value)
+      && value.indexOf("@") >= 0
+      && !"users".equalsIgnoreCase(value.trim())
+      && !"api".equalsIgnoreCase(value.trim())
+      && !"user".equalsIgnoreCase(value.trim());
 }
 
-// ---- 2) Parse incoming jsonBody (groups only; ignore static status on entitlement) ----
-Map incomingWrapper = (Map) requestEndPoint.getBody();
-String incomingJsonStr = (incomingWrapper != null && incomingWrapper.get("jsonBody") != null)
-    ? incomingWrapper.get("jsonBody").toString().trim() : "";
+if (provisioningPlan != null) {
 
-log.debug("[Hoop-BeforeRule] incoming jsonBody=" + incomingJsonStr);
+  log.debug("===== HOOP BEFORE RULE START =====");
 
-JSONArray requestedGroups = new JSONArray();
-if (incomingJsonStr.length() > 0) {
+  AccountRequest accountRequest = null;
+
+  for (AccountRequest accReqTemp : Util.iterate(provisioningPlan.getAccountRequests())) {
+    accountRequest = accReqTemp;
+  }
+
+  if (accountRequest == null) {
+    log.error("No AccountRequest found in ProvisioningPlan");
+    throw new ConnectorException("No AccountRequest found");
+  }
+
+  ObjectOperation objectOp = accountRequest.getOp();
+  boolean isCreateOp = (objectOp != null && ObjectOperation.Create.equals(objectOp));
+
+  String endpointName = null;
+  try {
+    if (requestEndPoint != null && Util.isNotNullOrEmpty(requestEndPoint.getUniqueNameForEndPoint())) {
+      endpointName = requestEndPoint.getUniqueNameForEndPoint();
+    } else if (requestEndPoint != null && Util.isNotNullOrEmpty(requestEndPoint.getOperationType())) {
+      endpointName = requestEndPoint.getOperationType();
+    }
+  } catch (Exception ignore) {
+  }
+
+  boolean isCreateAccountEndpoint = Util.isNotNullOrEmpty(endpointName)
+      && endpointName.toLowerCase().indexOf("create") >= 0;
+
+  // --------------------------------------------------
+  // Resolve displayName from plan (name / displayName)
+  // --------------------------------------------------
+  String displayNameFromPlan = null;
+  List attributeRequests = accountRequest.getAttributeRequests();
+  if (attributeRequests != null) {
+    for (int i = 0; i < attributeRequests.size(); i++) {
+      AttributeRequest attrReq = (AttributeRequest) attributeRequests.get(i);
+      if (attrReq != null && attrReq.getValue() != null) {
+        String attrName = attrReq.getName();
+        if ("name".equalsIgnoreCase(attrName) || "displayName".equalsIgnoreCase(attrName)) {
+          displayNameFromPlan = String.valueOf(attrReq.getValue()).trim();
+          if (Util.isNotNullOrEmpty(displayNameFromPlan)) {
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (Util.isNullOrEmpty(displayNameFromPlan) && identity != null) {
     try {
-        // Template may not be strict JSON if $plan.groups$ is empty; tolerate that
-        JSONObject incomingJson = new JSONObject(incomingJsonStr);
-        if (incomingJson.has("groups") && !incomingJson.isNull("groups")) {
-            Object g = incomingJson.get("groups");
-            if (g instanceof JSONArray) {
-                requestedGroups = (JSONArray) g;
-            } else if (g instanceof String) {
-                String raw = ((String) g).trim();
-                if (raw.length() > 0) {
-                    // "a,b" or single value
-                    String[] parts = raw.split(",");
-                    for (int i = 0; i < parts.length; i++) {
-                        String p = parts[i].trim();
-                        if (p.length() > 0) {
-                            requestedGroups.put(p);
-                        }
-                    }
-                }
-            } else {
-                // single non-string value
-                requestedGroups.put(String.valueOf(g));
-            }
-        }
-    } catch (Exception parseEx) {
-        // Fallback: if body is broken JSON but contains a groups array fragment
-        log.warn("[Hoop-BeforeRule] Could not JSON-parse body, trying array extract: " + parseEx.getMessage());
-        int gIdx = incomingJsonStr.indexOf("\"groups\"");
-        if (gIdx >= 0) {
-            int lb = incomingJsonStr.indexOf('[', gIdx);
-            int rb = incomingJsonStr.indexOf(']', lb);
-            if (lb >= 0 && rb > lb) {
-                requestedGroups = new JSONArray(incomingJsonStr.substring(lb, rb + 1));
-            }
-        }
+      if (Util.isNotNullOrEmpty(identity.getDisplayName())) {
+        displayNameFromPlan = identity.getDisplayName().trim();
+      } else if (Util.isNotNullOrEmpty(identity.getName())) {
+        displayNameFromPlan = identity.getName().trim();
+      }
+    } catch (Exception ignore) {
     }
-}
+  }
+  log.debug("displayNameFromPlan = " + displayNameFromPlan);
 
-log.info("[Hoop-BeforeRule] requestedGroups=" + requestedGroups.toString());
+  // --------------------------------------------------
+  // CREATE ACCOUNT short-circuit
+  // Create Account hits POST /api/users (collection). Do NOT treat path
+  // segment "users" as email and do NOT GET-merge / rewrite body from that.
+  // Ensure email (and nativeIdentity) come from plan / Identity.
+  // --------------------------------------------------
+  if (isCreateOp || isCreateAccountEndpoint) {
 
-// ---- 3) Status ONLY from Enable/Disable endpoints ----
-// Do NOT read "status":"active" from Add/Remove templates — that re-enables disabled users.
-String resolvedStatus = null;
-if (isDisable) {
-    resolvedStatus = "inactive";
-} else if (isEnable) {
-    resolvedStatus = "active";
-}
-// else entitlement op: preserve current status after GET
+    log.debug("Create Account path — ensuring email without GET merge. endpoint=" + endpointName);
 
-// ---- 4) GET current Hoop account ----
-// Add Entitlement + 404 => bootstrap Create (POST /api/users) so Modify-with-missing-target works.
-// Remove / Enable / Disable + 404 => fail closed (cannot modify missing user).
-Map existingHeaders = requestEndPoint.getHeader();
-Object authHeader = (existingHeaders != null) ? existingHeaders.get("Authorization") : null;
-
-JSONArray currentGroups = new JSONArray();
-String currentName = (planDisplayName != null) ? planDisplayName : email;
-String currentStatus = null;
-boolean bootstrapCreate = false;
-
-CloseableHttpClient client = HttpClients.createDefault();
-CloseableHttpResponse resp = null;
-try {
-    HttpGet get = new HttpGet(urlPath);
-    if (authHeader != null) {
-        get.setHeader("Authorization", authHeader.toString());
+    String email = resolveEmailFromIdentity(accountRequest);
+    if (!isLikelyEmail(email)) {
+      throw new ConnectorException(
+          "Hoop Create Account requires email. Identity has no usable email/mail/UPN; "
+              + "ensure Create Form Field 'email' is required and populated.");
     }
-    get.setHeader("Accept", "application/json");
 
-    resp = client.execute(get);
-    int status = resp.getStatusLine().getStatusCode();
-    String respBody = (resp.getEntity() != null) ? EntityUtils.toString(resp.getEntity()) : "";
-    log.debug("[Hoop-BeforeRule] GET status=" + status + " body=" + respBody);
+    if (Util.isNullOrEmpty(accountRequest.getNativeIdentity())
+        || !isLikelyEmail(accountRequest.getNativeIdentity())) {
+      accountRequest.setNativeIdentity(email);
+      log.debug("Set AccountRequest.nativeIdentity for Create = " + email);
+    }
 
-    if (status == 404) {
-        if (isAdd) {
-            bootstrapCreate = true;
-            currentGroups = new JSONArray();
-            currentStatus = null;
-            log.warn("[Hoop-BeforeRule] User not found (404) on Add Entitlement - bootstrapping Create for identity="
-                + email);
-        } else {
-            throw new RuntimeException("Hoop-BeforeRule GET failed status=404 body=" + respBody
-                + " — Hoop user '" + email + "' does not exist. Create the account first "
-                + "(or use Add Entitlement which can bootstrap Create).");
+    Map jsonBody = requestEndPoint.getBody();
+    String jsonBodyString = null;
+    if (jsonBody != null) {
+      jsonBodyString = (String) jsonBody.get("jsonBody");
+    }
+
+    Map existingJsonMap = null;
+    if (Util.isNotNullOrEmpty(jsonBodyString)) {
+      try {
+        Object parsed = JsonUtil.parseJson(jsonBodyString);
+        if (parsed instanceof Map) {
+          existingJsonMap = (Map) parsed;
         }
-    } else if (status != 200) {
-        throw new RuntimeException("Hoop-BeforeRule GET failed status=" + status + " body=" + respBody);
+      } catch (Exception e) {
+        log.warn("Create Account: could not parse existing jsonBody, will rebuild. err=" + e);
+      }
+    }
+
+    String bodyEmail = null;
+    String bodyName = displayNameFromPlan;
+    String bodyStatus = "active";
+    List bodyGroups = new ArrayList();
+
+    if (existingJsonMap != null) {
+      if (existingJsonMap.get("email") != null) {
+        bodyEmail = String.valueOf(existingJsonMap.get("email")).trim();
+      }
+      if (existingJsonMap.get("name") != null
+          && Util.isNotNullOrEmpty(String.valueOf(existingJsonMap.get("name")).trim())) {
+        bodyName = String.valueOf(existingJsonMap.get("name")).trim();
+      }
+      if (existingJsonMap.get("status") != null
+          && Util.isNotNullOrEmpty(String.valueOf(existingJsonMap.get("status")).trim())) {
+        bodyStatus = String.valueOf(existingJsonMap.get("status")).trim();
+      }
+      Object g = existingJsonMap.get("groups");
+      if (g instanceof List) {
+        bodyGroups = (List) g;
+      }
+    }
+
+    // Reject token leftovers / path-derived junk ("users")
+    if (!isLikelyEmail(bodyEmail)) {
+      bodyEmail = email;
+    }
+    if (Util.isNullOrEmpty(bodyName)) {
+      bodyName = displayNameFromPlan;
+    }
+    if (Util.isNullOrEmpty(bodyName)) {
+      bodyName = email;
+    }
+
+    Map finalJsonMap = new HashMap();
+    finalJsonMap.put("email", bodyEmail);
+    finalJsonMap.put("name", bodyName);
+    finalJsonMap.put("status", bodyStatus);
+    if (bodyGroups != null && !bodyGroups.isEmpty()) {
+      finalJsonMap.put("groups", bodyGroups);
+    }
+
+    String finalJson = JsonUtil.render(finalJsonMap);
+    Map bodyMap = new HashMap();
+    bodyMap.put("jsonBody", finalJson);
+    requestEndPoint.setBody(bodyMap);
+
+    log.debug("Create Account final body = " + finalJson);
+    log.debug("===== HOOP BEFORE RULE END (Create Account) =====");
+    return requestEndPoint;
+  }
+
+  // --------------------------------------------------
+  // MODIFY / ENABLE / DISABLE / Add-Entitlement path
+  // Email from URL .../api/users/{email} (must look like an email)
+  // --------------------------------------------------
+  String fullUrl = requestEndPoint.getFullUrl();
+  log.debug("Full URL = " + fullUrl);
+
+  String identityFromUrl = null;
+  if (Util.isNotNullOrEmpty(fullUrl)) {
+    String[] parts = fullUrl.split("/");
+    if (parts != null && parts.length > 0) {
+      identityFromUrl = parts[parts.length - 1];
+    }
+  }
+
+  if (!isLikelyEmail(identityFromUrl)) {
+    identityFromUrl = resolveEmailFromIdentity(accountRequest);
+    log.debug("URL path was not an email; resolved from plan/identity = " + identityFromUrl);
+  }
+
+  if (!isLikelyEmail(identityFromUrl)) {
+    throw new ConnectorException(
+        "Unable to resolve Hoop user email from URL or Identity. fullUrl=" + fullUrl);
+  }
+
+  if (Util.isNullOrEmpty(accountRequest.getNativeIdentity())
+      || !isLikelyEmail(accountRequest.getNativeIdentity())) {
+    accountRequest.setNativeIdentity(identityFromUrl);
+    log.debug("Set AccountRequest.nativeIdentity = " + identityFromUrl);
+  }
+
+  log.debug("Resolved identity email = " + identityFromUrl);
+
+  // --------------------------------------------------
+  // Existing body
+  // --------------------------------------------------
+  Map jsonBody = requestEndPoint.getBody();
+  String jsonBodyString = null;
+
+  if (jsonBody != null) {
+    jsonBodyString = (String) jsonBody.get("jsonBody");
+  }
+
+  log.debug("Original JSON Body = " + jsonBodyString);
+
+  Map existingJsonMap = null;
+  if (Util.isNotNullOrEmpty(jsonBodyString)) {
+    try {
+      Object parsed = JsonUtil.parseJson(jsonBodyString);
+      if (parsed instanceof Map) {
+        existingJsonMap = (Map) parsed;
+      }
+    } catch (Exception e) {
+      log.error("Failed to parse existing JSON body", e);
+    }
+  }
+
+  // --------------------------------------------------
+  // WebServicesClient
+  // --------------------------------------------------
+  WebServicesClient client = new WebServicesClient();
+
+  Map args = new HashMap();
+  args.put(WebServicesClient.ARG_URL, application.getAttributeValue("genericWebServiceBaseUrl"));
+  client.configure(args);
+
+  List allowedStatuses = new ArrayList();
+  allowedStatuses.add("2**");
+  allowedStatuses.add("4**");
+
+  String getUrl = application.getAttributeValue("genericWebServiceBaseUrl")
+      + "/api/users/" + identityFromUrl;
+
+  log.debug("GET URL = " + getUrl);
+
+  Map header = requestEndPoint.getHeader();
+  String existingObject = null;
+  boolean bootstrapCreate = false;
+
+  try {
+    existingObject = client.executeGet(getUrl, header, allowedStatuses);
+    log.debug("Existing Object Response = " + existingObject);
+  } catch (Exception e) {
+    String msg = String.valueOf(e.getMessage());
+    // Add Entitlement for a user with no Hoop account: create then assign groups
+    if (msg != null && (msg.indexOf("404") >= 0 || msg.toLowerCase().indexOf("not found") >= 0)) {
+      boolean hasGroupAdd = false;
+      if (attributeRequests != null) {
+        for (int i = 0; i < attributeRequests.size(); i++) {
+          AttributeRequest ar = (AttributeRequest) attributeRequests.get(i);
+          if (ar != null && "groups".equalsIgnoreCase(ar.getName())
+              && ProvisioningPlan.Operation.Add.equals(ar.getOp())) {
+            hasGroupAdd = true;
+            break;
+          }
+        }
+      }
+      if (hasGroupAdd) {
+        log.warn("Hoop user not found for Add Entitlement — will POST Create then assign groups. email="
+            + identityFromUrl);
+        bootstrapCreate = true;
+        existingObject = null;
+      } else {
+        log.error("GET user failed", e);
+        throw new ConnectorException("Failed to fetch existing user: " + e.getMessage());
+      }
     } else {
-        JSONObject currentUserJson = new JSONObject(respBody);
-
-        String returnedEmail = currentUserJson.has("email") && !currentUserJson.isNull("email")
-            ? currentUserJson.getString("email") : null;
-        if (returnedEmail != null && !returnedEmail.equalsIgnoreCase(email)) {
-            throw new RuntimeException("Hoop-BeforeRule GET identity mismatch: returned="
-                + returnedEmail + " expected=" + email);
-        }
-
-        if (currentUserJson.has("groups") && !currentUserJson.isNull("groups")) {
-            currentGroups = currentUserJson.getJSONArray("groups");
-        }
-        if (currentUserJson.has("name") && !currentUserJson.isNull("name")
-                && currentUserJson.getString("name").trim().length() > 0) {
-            currentName = currentUserJson.getString("name");
-        }
-        if (currentUserJson.has("status") && !currentUserJson.isNull("status")
-                && currentUserJson.getString("status").trim().length() > 0) {
-            currentStatus = currentUserJson.getString("status");
-        }
+      log.error("GET user failed", e);
+      throw new ConnectorException("Failed to fetch existing user: " + e.getMessage());
     }
-} finally {
-    if (resp != null) {
-        try { resp.close(); } catch (Exception ignore) {}
+  }
+
+  Map existingMap = null;
+  if (!bootstrapCreate) {
+    if (Util.isNullOrEmpty(existingObject)) {
+      throw new ConnectorException("Empty response while fetching existing user");
     }
-    try { client.close(); } catch (Exception ignore) {}
-}
-
-if (resolvedStatus == null) {
-    if (bootstrapCreate) {
-        resolvedStatus = "active";
-        log.info("[Hoop-BeforeRule] Bootstrap Create - status=active");
-    } else {
-        resolvedStatus = (currentStatus != null) ? currentStatus : "active";
-        log.info("[Hoop-BeforeRule] Preserving existing status=" + resolvedStatus);
+    Object existingParsed = JsonUtil.parseJson(existingObject);
+    if (!(existingParsed instanceof Map)) {
+      throw new ConnectorException("Unexpected JSON structure for existing user");
     }
-} else {
-    log.info("[Hoop-BeforeRule] Setting status from enable/disable=" + resolvedStatus);
-}
+    existingMap = (Map) existingParsed;
+  } else {
+    existingMap = new HashMap();
+    existingMap.put("email", identityFromUrl);
+    existingMap.put("name",
+        Util.isNotNullOrEmpty(displayNameFromPlan) ? displayNameFromPlan : identityFromUrl);
+    existingMap.put("status", "active");
+    existingMap.put("groups", new ArrayList());
+  }
 
-// ---- 5) Merge groups ----
-LinkedHashSet mergedSet = new LinkedHashSet();
-for (int i = 0; i < currentGroups.length(); i++) {
-    mergedSet.add(currentGroups.getString(i));
-}
+  // --------------------------------------------------
+  // Base values
+  // --------------------------------------------------
+  String email = (String) existingMap.get("email");
+  if (!isLikelyEmail(email)) {
+    email = identityFromUrl;
+  }
 
-if (isEntitlementOp && requestedGroups.length() > 0) {
-    if (isRemove) {
-        for (int i = 0; i < requestedGroups.length(); i++) {
-            mergedSet.remove(requestedGroups.getString(i));
+  String name = (String) existingMap.get("name");
+  if (Util.isNullOrEmpty(name) && Util.isNotNullOrEmpty(displayNameFromPlan)) {
+    name = displayNameFromPlan;
+  }
+  if (Util.isNullOrEmpty(name)) {
+    name = email;
+  }
+
+  String status = (String) existingMap.get("status");
+  if (Util.isNullOrEmpty(status)) {
+    status = "active";
+  }
+
+  List finalGroups = new ArrayList();
+  Object existingGroupsObj = existingMap.get("groups");
+
+  if (existingGroupsObj instanceof List) {
+    finalGroups.addAll((List) existingGroupsObj);
+  }
+
+  log.debug("Existing Groups = " + finalGroups);
+
+  // --------------------------------------------------
+  // Enable / Disable — force status
+  // --------------------------------------------------
+  if (ObjectOperation.Enable.equals(objectOp)) {
+    status = "active";
+    log.debug("Enable Account detected — forcing status=active");
+  } else if (ObjectOperation.Disable.equals(objectOp)) {
+    status = "inactive";
+    log.debug("Disable Account detected — forcing status=inactive");
+  } else if (existingJsonMap != null && existingJsonMap.get("status") != null) {
+    String bodyStatus = String.valueOf(existingJsonMap.get("status")).trim();
+    if (Util.isNotNullOrEmpty(bodyStatus)) {
+      status = bodyStatus;
+    }
+  }
+
+  // --------------------------------------------------
+  // Process AttributeRequests (groups Add / Remove)
+  // --------------------------------------------------
+  if (attributeRequests != null) {
+
+    for (int i = 0; i < attributeRequests.size(); i++) {
+
+      AttributeRequest attrReq = (AttributeRequest) attributeRequests.get(i);
+      if (attrReq == null) {
+        continue;
+      }
+
+      String attrName = attrReq.getName();
+      Object attrValue = attrReq.getValue();
+      ProvisioningPlan.Operation op = attrReq.getOp();
+
+      log.debug("AttributeRequest -> name=" + attrName + ", op=" + op + ", value=" + attrValue);
+
+      if (!"groups".equalsIgnoreCase(attrName) || attrValue == null) {
+        continue;
+      }
+
+      List valuesToProcess = new ArrayList();
+
+      if (attrValue instanceof List) {
+        valuesToProcess.addAll((List) attrValue);
+      } else {
+        valuesToProcess.add(attrValue);
+      }
+
+      for (int j = 0; j < valuesToProcess.size(); j++) {
+
+        Object valObj = valuesToProcess.get(j);
+        if (valObj == null) {
+          continue;
         }
-        log.info("[Hoop-BeforeRule] REMOVE groups " + requestedGroups.toString());
-    } else {
-        for (int i = 0; i < requestedGroups.length(); i++) {
-            mergedSet.add(requestedGroups.getString(i));
+
+        String groupValue = String.valueOf(valObj).trim();
+        if (Util.isNullOrEmpty(groupValue)) {
+          continue;
         }
-        log.info("[Hoop-BeforeRule] ADD groups " + requestedGroups.toString());
+
+        if (ProvisioningPlan.Operation.Add.equals(op)) {
+          if (!finalGroups.contains(groupValue)) {
+            finalGroups.add(groupValue);
+            log.debug("Added Group = " + groupValue);
+          }
+        } else if (ProvisioningPlan.Operation.Remove.equals(op)) {
+          if (finalGroups.contains(groupValue)) {
+            finalGroups.remove(groupValue);
+            log.debug("Removed Group = " + groupValue);
+          }
+        }
+      }
     }
-} else if (isEntitlementOp) {
-    log.warn("[Hoop-BeforeRule] Entitlement op but no requested groups parsed - leaving groups unchanged");
-} else {
-    log.info("[Hoop-BeforeRule] Enable/Disable - preserving groups unchanged");
+  }
+
+  log.debug("Final Groups after merge = " + finalGroups);
+
+  // --------------------------------------------------
+  // Final JSON (full replace — API expects complete object)
+  // --------------------------------------------------
+  Map finalJsonMap = new HashMap();
+  finalJsonMap.put("email", email);
+  finalJsonMap.put("name", name);
+  finalJsonMap.put("status", status);
+  finalJsonMap.put("groups", finalGroups);
+
+  String finalJson = JsonUtil.render(finalJsonMap);
+  log.debug("Final JSON to be sent = " + finalJson);
+
+  Map bodyMap = new HashMap();
+  bodyMap.put("jsonBody", finalJson);
+  requestEndPoint.setBody(bodyMap);
+
+  if (bootstrapCreate) {
+    String createUrl = application.getAttributeValue("genericWebServiceBaseUrl") + "/api/users";
+    requestEndPoint.setFullUrl(createUrl);
+    try {
+      requestEndPoint.setHttpMethodType("POST");
+    } catch (Exception e) {
+      log.warn("Could not set HttpMethodType to POST for bootstrap create: " + e);
+    }
+    log.debug("Bootstrap Create — switched endpoint to POST " + createUrl);
+  }
+
+  log.debug("===== HOOP BEFORE RULE END =====");
 }
-
-if (bootstrapCreate && mergedSet.isEmpty()) {
-    throw new RuntimeException("Hoop-BeforeRule cannot bootstrap Create for '" + email
-        + "': Add Entitlement had no groups in plan. Create Account first, or include a group.");
-}
-
-JSONArray finalGroups = new JSONArray();
-Iterator mi = mergedSet.iterator();
-while (mi.hasNext()) {
-    finalGroups.put(mi.next());
-}
-
-// ---- 6) Rewrite body (+ switch Add+404 to POST Create) ----
-JSONObject fullBody = new JSONObject();
-fullBody.put("email", email);
-fullBody.put("name", currentName);
-fullBody.put("status", resolvedStatus);
-fullBody.put("groups", finalGroups);
-
-String finalBodyStr = fullBody.toString();
-log.info("[Hoop-BeforeRule] finalBody=" + finalBodyStr);
-
-Map wrapperBody = (incomingWrapper != null) ? incomingWrapper : new HashMap();
-wrapperBody.put("jsonBody", finalBodyStr);
-wrapperBody.put("bodyFormat", "raw");
-requestEndPoint.setBody(wrapperBody);
-
-if (bootstrapCreate) {
-    // PUT /api/users/{email} cannot create; switch to POST /api/users
-    requestEndPoint.setFullUrl(usersCollectionUrl);
-    requestEndPoint.setHttpMethodType("POST");
-    log.info("[Hoop-BeforeRule] Switched endpoint to Create POST url=" + usersCollectionUrl);
-}
-
-log.info("[Amlak-Rule-BeforeRule-Hoop] EXIT endpoint=" + endpointName
-    + " email=" + email + " status=" + resolvedStatus + " groups=" + finalGroups.toString()
-    + " bootstrapCreate=" + bootstrapCreate);
 
 return requestEndPoint;
 ]]></Source>
