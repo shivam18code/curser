@@ -1,15 +1,11 @@
 // Source mirror of Amlak-Rule-Hoop-AfterProvisioningRule.xml
 // Import the .xml into IIQ, not this .bsh file.
 //
-// Purpose:
-// 1) Keep existing failure-notification hooks (non-blocking).
-// 2) After successful Create / Modify / Enable / Disable, refresh the IIQ Link:
-//    a) Preferred: connector.getObject (requires Get Object URL = $getObject.nativeIdentity$)
-//    b) Fallback: merge groups from the Modify plan AttributeRequests onto the Link
-//       (so UI updates even if Get Object is still misconfigured)
+// After successful Create/Modify/Enable/Disable:
+//  1) Try connector.getObject (needs Get Object URL = $getObject.nativeIdentity$)
+//  2) Fallback: merge groups from Modify plan AttributeRequests onto the Link
 
 import org.apache.log4j.Logger;
-import sailpoint.object.Application;
 import sailpoint.object.Filter;
 import sailpoint.object.Link;
 import sailpoint.object.ProvisioningPlan;
@@ -37,7 +33,6 @@ if (plan == null) {
     return null;
 }
 
-// --- Notifications (wrapped so a failure here never blocks Link refresh) ---
 try {
     processProvisioningFailureNotification(plan);
 } catch (Exception e) {
@@ -50,48 +45,6 @@ try {
     log.error("[" + RULE_NAME + "] sendProvisioningFailureNotification failed: " + e.getMessage(), e);
 }
 
-// Helper: flatten AttributeRequest value to a list of strings
-List toValueList(Object val) {
-    List out = new ArrayList();
-    if (val == null) {
-        return out;
-    }
-    if (val instanceof Collection) {
-        Iterator vi = ((Collection) val).iterator();
-        while (vi.hasNext()) {
-            Object one = vi.next();
-            if (one != null && String.valueOf(one).trim().length() > 0) {
-                out.add(String.valueOf(one).trim());
-            }
-        }
-    } else {
-        String s = String.valueOf(val).trim();
-        if (s.length() > 0) {
-            out.add(s);
-        }
-    }
-    return out;
-}
-
-// Helper: current Link.groups into a set
-LinkedHashSet linkGroupsToSet(Link link) {
-    LinkedHashSet set = new LinkedHashSet();
-    Object current = link.getAttribute("groups");
-    if (current instanceof Collection) {
-        Iterator ci = ((Collection) current).iterator();
-        while (ci.hasNext()) {
-            Object one = ci.next();
-            if (one != null && String.valueOf(one).trim().length() > 0) {
-                set.add(String.valueOf(one).trim());
-            }
-        }
-    } else if (current != null && String.valueOf(current).trim().length() > 0) {
-        set.add(String.valueOf(current).trim());
-    }
-    return set;
-}
-
-// --- Refresh Link from target after successful provisioning ---
 try {
     String appName = (application != null) ? application.getName() : "Hoop";
     List acctReqs = plan.getAccountRequests();
@@ -147,8 +100,7 @@ try {
 
             if (!success) {
                 log.warn("[" + RULE_NAME + "] " + opStr + " did not commit for " + nativeIdentity
-                    + " (status=" + (acctResult != null ? acctResult.getStatus() : "null")
-                    + "), skipping Link refresh.");
+                    + ", skipping Link refresh.");
                 continue;
             }
 
@@ -170,14 +122,12 @@ try {
             Link link = (Link) links.get(0);
             boolean refreshed = false;
 
-            // Preferred: Single Account Aggregation equivalent (Get Object)
-            // REQUIRES Get Object contextUrl = /api/users/$getObject.nativeIdentity$
+            // 1) Preferred: getObject (Get Object URL MUST be $getObject.nativeIdentity$)
             if (connector != null) {
                 try {
                     ResourceObject ro = connector.getObject(Connector.TYPE_ACCOUNT, nativeIdentity, null);
                     if (ro != null && ro.getAttributes() != null) {
                         Attributes attrs = ro.getAttributes();
-
                         if (attrs.containsKey("groups")) {
                             link.setAttribute("groups", attrs.get("groups"));
                         }
@@ -196,7 +146,6 @@ try {
                         if (attrs.containsKey("id")) {
                             link.setAttribute("id", attrs.get("id"));
                         }
-
                         context.saveObject(link);
                         context.commitTransaction();
                         refreshed = true;
@@ -206,22 +155,34 @@ try {
                             + " status=" + link.getAttribute("status"));
                     } else {
                         log.warn("[" + RULE_NAME + "] getObject returned null/empty for " + nativeIdentity
-                            + " — check Get Object URL uses $getObject.nativeIdentity$");
+                            + " — Get Object URL must be /api/users/$getObject.nativeIdentity$");
                     }
                 } catch (Exception getEx) {
-                    log.error("[" + RULE_NAME + "] getObject refresh failed for " + nativeIdentity
+                    log.error("[" + RULE_NAME + "] getObject failed for " + nativeIdentity
                         + ": " + getEx.getMessage()
-                        + " — ensure Get Object URL is /api/users/$getObject.nativeIdentity$", getEx);
+                        + " — fix Get Object to $getObject.nativeIdentity$", getEx);
                 }
             }
 
-            // Fallback A: Modify — apply groups Add/Remove from the plan onto the Link
+            // 2) Fallback: Modify — merge plan AttributeRequests(groups) onto Link
             if (!refreshed && "Modify".equals(opStr)) {
                 try {
-                    LinkedHashSet merged = linkGroupsToSet(link);
+                    LinkedHashSet merged = new LinkedHashSet();
+                    Object current = link.getAttribute("groups");
+                    if (current instanceof Collection) {
+                        Iterator ci = ((Collection) current).iterator();
+                        while (ci.hasNext()) {
+                            Object one = ci.next();
+                            if (one != null && String.valueOf(one).trim().length() > 0) {
+                                merged.add(String.valueOf(one).trim());
+                            }
+                        }
+                    } else if (current != null && String.valueOf(current).trim().length() > 0) {
+                        merged.add(String.valueOf(current).trim());
+                    }
+
                     List groupReqs = acctReq.getAttributeRequests("groups");
                     boolean touched = false;
-
                     if (groupReqs != null) {
                         for (Iterator gri = groupReqs.iterator(); gri.hasNext();) {
                             AttributeRequest gar = (AttributeRequest) gri.next();
@@ -230,9 +191,22 @@ try {
                             }
                             Operation aop = gar.getOperation();
                             String aopStr = (aop != null) ? aop.toString() : "";
-                            List vals = toValueList(gar.getValue());
-                            log.info("[" + RULE_NAME + "] Plan groups AttributeRequest op=" + aopStr
-                                + " values=" + vals);
+
+                            List vals = new ArrayList();
+                            Object val = gar.getValue();
+                            if (val instanceof Collection) {
+                                Iterator vi = ((Collection) val).iterator();
+                                while (vi.hasNext()) {
+                                    Object one = vi.next();
+                                    if (one != null && String.valueOf(one).trim().length() > 0) {
+                                        vals.add(String.valueOf(one).trim());
+                                    }
+                                }
+                            } else if (val != null && String.valueOf(val).trim().length() > 0) {
+                                vals.add(String.valueOf(val).trim());
+                            }
+
+                            log.info("[" + RULE_NAME + "] Plan groups op=" + aopStr + " values=" + vals);
 
                             if ("Add".equals(aopStr)) {
                                 merged.addAll(vals);
@@ -256,16 +230,15 @@ try {
                         log.info("[" + RULE_NAME + "] Fallback refreshed Link groups from plan for "
                             + nativeIdentity + " groups=" + link.getAttribute("groups"));
                     } else {
-                        log.warn("[" + RULE_NAME + "] Modify had no usable groups AttributeRequests for "
+                        log.warn("[" + RULE_NAME + "] Modify had no groups AttributeRequests for "
                             + nativeIdentity);
                     }
                 } catch (Exception planEx) {
-                    log.error("[" + RULE_NAME + "] Plan-based groups fallback failed: "
-                        + planEx.getMessage(), planEx);
+                    log.error("[" + RULE_NAME + "] Plan groups fallback failed: " + planEx.getMessage(), planEx);
                 }
             }
 
-            // Fallback B: Enable/Disable — patch status
+            // 3) Fallback: Enable/Disable status
             if (!refreshed && ("Enable".equals(opStr) || "Disable".equals(opStr))) {
                 String newStatus = "Enable".equals(opStr) ? "active" : "inactive";
                 link.setAttribute("status", newStatus);
@@ -276,8 +249,8 @@ try {
             }
 
             if (!refreshed) {
-                log.warn("[" + RULE_NAME + "] Link groups/status NOT refreshed for " + nativeIdentity
-                    + ". Fix Get Object to $getObject.nativeIdentity$ and re-import this rule.");
+                log.warn("[" + RULE_NAME + "] Link NOT refreshed for " + nativeIdentity
+                    + ". Fix Get Object URL to $getObject.nativeIdentity$.");
             }
         }
     }
