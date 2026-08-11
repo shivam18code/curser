@@ -1,0 +1,269 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!DOCTYPE Rule PUBLIC "sailpoint.dtd" "sailpoint.dtd">
+<!--
+  Web Services Before Operation Rule for Hoop application.
+  Attached to: Add Entitlement, Remove Entitlement, Disable Account, Enable Account.
+
+  Behavior:
+  - Add/Remove Entitlement: merge groups; preserve existing Hoop status
+    (ignores static "status":"active" in entitlement templates)
+  - Disable Account: set status inactive; preserve groups
+  - Enable Account: set status active; preserve groups
+  - GET current account first; abort on non-200 (fail closed)
+-->
+<Rule language="beanshell" name="Amlak-Rule-BeforeRule-Hoop" type="WebServiceBeforeOperationRule">
+  <Description>
+    BeforeOperation rule for Hoop Web Services connector.
+    GETs the current account, merges groups for Add/Remove Entitlement,
+    and sets status only for Enable/Disable Account operations.
+  </Description>
+  <Signature returnType="Object">
+    <Inputs>
+      <Argument name="application">
+        <Description>The application object that owns this endpoint.</Description>
+      </Argument>
+      <Argument name="requestEndPoint">
+        <Description>The current request endpoint being processed.</Description>
+      </Argument>
+      <Argument name="oldResponseMap">
+        <Description>Response map from previous endpoint executions.</Description>
+      </Argument>
+      <Argument name="restClient">
+        <Description>REST client used by the Web Services connector.</Description>
+      </Argument>
+      <Argument name="provisioningPlan">
+        <Description>Provisioning plan for the current operation, if any.</Description>
+      </Argument>
+    </Inputs>
+    <Returns>
+      <Argument name="requestEndPoint">
+        <Description>Updated endpoint with rewritten jsonBody.</Description>
+      </Argument>
+    </Returns>
+  </Signature>
+  <Source><![CDATA[
+import org.apache.log4j.Logger;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.util.EntityUtils;
+import org.json.JSONObject;
+import org.json.JSONArray;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.Iterator;
+
+Logger log = Logger.getLogger("com.amlak.application.hoop");
+
+String endpointName = requestEndPoint.getUniqueNameForEndPoint();
+String endpointLower = (endpointName != null) ? endpointName.toLowerCase() : "";
+
+log.info("[Amlak-Rule-BeforeRule-Hoop] ENTRY endpoint=" + endpointName);
+
+boolean isRemove = endpointLower.contains("remove");
+boolean isDisable = endpointLower.contains("disable");
+boolean isEnable = endpointLower.contains("enable");
+// Add Entitlement (including typo "Add Entitilement") = not remove/enable/disable
+boolean isEntitlementOp = !isDisable && !isEnable;
+
+// ---- 1) Identity from URL (/api/users/$plan.nativeIdentity$) ----
+String urlPath = requestEndPoint.getFullUrl();
+String email = null;
+try {
+    String pathOnly = urlPath;
+    int q = pathOnly.indexOf('?');
+    if (q >= 0) {
+        pathOnly = pathOnly.substring(0, q);
+    }
+    int hash = pathOnly.indexOf('#');
+    if (hash >= 0) {
+        pathOnly = pathOnly.substring(0, hash);
+    }
+    while (pathOnly.endsWith("/") && pathOnly.length() > 1) {
+        pathOnly = pathOnly.substring(0, pathOnly.length() - 1);
+    }
+
+    String tail = pathOnly.substring(pathOnly.lastIndexOf('/') + 1);
+    email = java.net.URLDecoder.decode(tail, "UTF-8");
+    if (email == null || email.trim().length() == 0) {
+        throw new RuntimeException("Empty identity in URL: " + urlPath);
+    }
+} catch (Throwable t) {
+    log.error("[Hoop-BeforeRule] Could not parse identity from URL: " + urlPath, t);
+    throw new RuntimeException("Hoop-BeforeRule could not derive identity from URL", t);
+}
+
+log.info("[Hoop-BeforeRule] identity=" + email + " endpoint=" + endpointName);
+
+// ---- 2) Parse incoming jsonBody (groups only; ignore static status on entitlement) ----
+Map incomingWrapper = (Map) requestEndPoint.getBody();
+String incomingJsonStr = (incomingWrapper != null && incomingWrapper.get("jsonBody") != null)
+    ? incomingWrapper.get("jsonBody").toString().trim() : "";
+
+log.debug("[Hoop-BeforeRule] incoming jsonBody=" + incomingJsonStr);
+
+JSONArray requestedGroups = new JSONArray();
+if (incomingJsonStr.length() > 0) {
+    try {
+        // Template may not be strict JSON if $plan.groups$ is empty; tolerate that
+        JSONObject incomingJson = new JSONObject(incomingJsonStr);
+        if (incomingJson.has("groups") && !incomingJson.isNull("groups")) {
+            Object g = incomingJson.get("groups");
+            if (g instanceof JSONArray) {
+                requestedGroups = (JSONArray) g;
+            } else if (g instanceof String) {
+                String raw = ((String) g).trim();
+                if (raw.length() > 0) {
+                    // "a,b" or single value
+                    String[] parts = raw.split(",");
+                    for (int i = 0; i < parts.length; i++) {
+                        String p = parts[i].trim();
+                        if (p.length() > 0) {
+                            requestedGroups.put(p);
+                        }
+                    }
+                }
+            } else {
+                // single non-string value
+                requestedGroups.put(String.valueOf(g));
+            }
+        }
+    } catch (Exception parseEx) {
+        // Fallback: if body is broken JSON but contains a groups array fragment
+        log.warn("[Hoop-BeforeRule] Could not JSON-parse body, trying array extract: " + parseEx.getMessage());
+        int gIdx = incomingJsonStr.indexOf("\"groups\"");
+        if (gIdx >= 0) {
+            int lb = incomingJsonStr.indexOf('[', gIdx);
+            int rb = incomingJsonStr.indexOf(']', lb);
+            if (lb >= 0 && rb > lb) {
+                requestedGroups = new JSONArray(incomingJsonStr.substring(lb, rb + 1));
+            }
+        }
+    }
+}
+
+log.info("[Hoop-BeforeRule] requestedGroups=" + requestedGroups.toString());
+
+// ---- 3) Status ONLY from Enable/Disable endpoints ----
+// Do NOT read "status":"active" from Add/Remove templates — that re-enables disabled users.
+String resolvedStatus = null;
+if (isDisable) {
+    resolvedStatus = "inactive";
+} else if (isEnable) {
+    resolvedStatus = "active";
+}
+// else entitlement op: preserve current status after GET
+
+// ---- 4) GET current Hoop account (fail closed) ----
+Map existingHeaders = requestEndPoint.getHeader();
+Object authHeader = (existingHeaders != null) ? existingHeaders.get("Authorization") : null;
+
+JSONArray currentGroups = new JSONArray();
+String currentName = email;
+String currentStatus = null;
+
+CloseableHttpClient client = HttpClients.createDefault();
+CloseableHttpResponse resp = null;
+try {
+    HttpGet get = new HttpGet(urlPath);
+    if (authHeader != null) {
+        get.setHeader("Authorization", authHeader.toString());
+    }
+    get.setHeader("Accept", "application/json");
+
+    resp = client.execute(get);
+    int status = resp.getStatusLine().getStatusCode();
+    String respBody = (resp.getEntity() != null) ? EntityUtils.toString(resp.getEntity()) : "";
+    log.debug("[Hoop-BeforeRule] GET status=" + status + " body=" + respBody);
+
+    if (status != 200) {
+        throw new RuntimeException("Hoop-BeforeRule GET failed status=" + status + " body=" + respBody);
+    }
+
+    JSONObject currentUserJson = new JSONObject(respBody);
+
+    String returnedEmail = currentUserJson.has("email") && !currentUserJson.isNull("email")
+        ? currentUserJson.getString("email") : null;
+    if (returnedEmail != null && !returnedEmail.equalsIgnoreCase(email)) {
+        throw new RuntimeException("Hoop-BeforeRule GET identity mismatch: returned="
+            + returnedEmail + " expected=" + email);
+    }
+
+    if (currentUserJson.has("groups") && !currentUserJson.isNull("groups")) {
+        currentGroups = currentUserJson.getJSONArray("groups");
+    }
+    if (currentUserJson.has("name") && !currentUserJson.isNull("name")
+            && currentUserJson.getString("name").trim().length() > 0) {
+        currentName = currentUserJson.getString("name");
+    }
+    if (currentUserJson.has("status") && !currentUserJson.isNull("status")
+            && currentUserJson.getString("status").trim().length() > 0) {
+        currentStatus = currentUserJson.getString("status");
+    }
+} finally {
+    if (resp != null) {
+        try { resp.close(); } catch (Exception ignore) {}
+    }
+    try { client.close(); } catch (Exception ignore) {}
+}
+
+if (resolvedStatus == null) {
+    resolvedStatus = (currentStatus != null) ? currentStatus : "active";
+    log.info("[Hoop-BeforeRule] Preserving existing status=" + resolvedStatus);
+} else {
+    log.info("[Hoop-BeforeRule] Setting status from enable/disable=" + resolvedStatus);
+}
+
+// ---- 5) Merge groups ----
+LinkedHashSet mergedSet = new LinkedHashSet();
+for (int i = 0; i < currentGroups.length(); i++) {
+    mergedSet.add(currentGroups.getString(i));
+}
+
+if (isEntitlementOp && requestedGroups.length() > 0) {
+    if (isRemove) {
+        for (int i = 0; i < requestedGroups.length(); i++) {
+            mergedSet.remove(requestedGroups.getString(i));
+        }
+        log.info("[Hoop-BeforeRule] REMOVE groups " + requestedGroups.toString());
+    } else {
+        for (int i = 0; i < requestedGroups.length(); i++) {
+            mergedSet.add(requestedGroups.getString(i));
+        }
+        log.info("[Hoop-BeforeRule] ADD groups " + requestedGroups.toString());
+    }
+} else if (isEntitlementOp) {
+    log.warn("[Hoop-BeforeRule] Entitlement op but no requested groups parsed - leaving groups unchanged");
+} else {
+    log.info("[Hoop-BeforeRule] Enable/Disable - preserving groups unchanged");
+}
+
+JSONArray finalGroups = new JSONArray();
+Iterator mi = mergedSet.iterator();
+while (mi.hasNext()) {
+    finalGroups.put(mi.next());
+}
+
+// ---- 6) Rewrite body ----
+JSONObject fullBody = new JSONObject();
+fullBody.put("email", email);
+fullBody.put("name", currentName);
+fullBody.put("status", resolvedStatus);
+fullBody.put("groups", finalGroups);
+
+String finalBodyStr = fullBody.toString();
+log.info("[Hoop-BeforeRule] finalBody=" + finalBodyStr);
+
+Map wrapperBody = (incomingWrapper != null) ? incomingWrapper : new HashMap();
+wrapperBody.put("jsonBody", finalBodyStr);
+wrapperBody.put("bodyFormat", "raw");
+requestEndPoint.setBody(wrapperBody);
+
+log.info("[Amlak-Rule-BeforeRule-Hoop] EXIT endpoint=" + endpointName
+    + " email=" + email + " status=" + resolvedStatus + " groups=" + finalGroups.toString());
+
+return requestEndPoint;
+  ]]></Source>
+</Rule>
