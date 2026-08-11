@@ -557,7 +557,9 @@ Full guide: [`Hoop-Groups-Refresh-After-Provisioning.md`](./Hoop-Groups-Refresh-
 | 6 | Remove Entitlement | Remove Entitlement | PUT | `/api/users/$plan.nativeIdentity$` | BeforeRule | — |
 | 7 | Disable Account | Disable Account | PUT | `/api/users/$plan.nativeIdentity$` | BeforeRule | — |
 | 8 | Enable Account | Enable Account | PUT | `/api/users/$plan.nativeIdentity$` | BeforeRule | — |
-| 9 | Get Object | Single Account Aggregation | GET | `/api/users/$plan.nativeIdentity$` | — | — |
+| 9 | Get Object | Single Account Aggregation | GET | `/api/users/$getObject.nativeIdentity$` | — | — |
+
+> **Get Object** must use `$getObject.nativeIdentity$`. Provisioning endpoints keep `$plan.nativeIdentity$`.
 
 ### Account schema
 
