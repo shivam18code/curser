@@ -557,9 +557,10 @@ Full guide: [`Hoop-Groups-Refresh-After-Provisioning.md`](./Hoop-Groups-Refresh-
 | 6 | Remove Entitlement | Remove Entitlement | PUT | `/api/users/$plan.nativeIdentity$` | BeforeRule | — |
 | 7 | Disable Account | Disable Account | PUT | `/api/users/$plan.nativeIdentity$` | BeforeRule | — |
 | 8 | Enable Account | Enable Account | PUT | `/api/users/$plan.nativeIdentity$` | BeforeRule | — |
-| 9 | Get Object | Single Account Aggregation | GET | `/api/users/$getObject.nativeIdentity$` | — | — |
+| 9 | Get Object | Single Account Aggregation | GET | `/api/users/$getobject.nativeIdentity$` | — | — |
 
-> **Get Object** must use `$getObject.nativeIdentity$`. Provisioning endpoints keep `$plan.nativeIdentity$`.
+> **Get Object** must use `$getobject.nativeIdentity$` (same pattern as Bitbucket). Provisioning endpoints keep `$plan.nativeIdentity$`.  
+> Bitbucket also has **empty** Add/Remove response mapping — groups refresh depends on working Get Object (+ AfterProvisioning), not on PUT response maps. See `Hoop-vs-Bitbucket-GetObject-Guide.md`.
 
 ### Account schema
 
