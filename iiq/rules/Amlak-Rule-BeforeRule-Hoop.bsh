@@ -1,5 +1,6 @@
 // Source mirror of Amlak-Rule-BeforeRule-Hoop.xml for easier review/diff.
 // Import the .xml into IIQ (Debug or iiq console), not this .bsh file.
+// Fully REPLACE the rule source in IIQ — do not append onto the old version.
 
 import org.apache.log4j.Logger;
 import org.apache.http.client.methods.HttpGet;
@@ -63,7 +64,8 @@ String incomingJsonStr = (incomingWrapper != null && incomingWrapper.get("jsonBo
 
 log.debug("[Hoop-BeforeRule] incoming jsonBody=" + incomingJsonStr);
 
-JSONArray requestedGroups = new JSONArray();
+// Named planGroups (not requestedGroups) to avoid BeanShell List type clash with older rule versions
+JSONArray planGroups = new JSONArray();
 if (incomingJsonStr.length() > 0) {
     try {
         // Template may not be strict JSON if $plan.groups$ is empty; tolerate that
@@ -71,7 +73,7 @@ if (incomingJsonStr.length() > 0) {
         if (incomingJson.has("groups") && !incomingJson.isNull("groups")) {
             Object g = incomingJson.get("groups");
             if (g instanceof JSONArray) {
-                requestedGroups = (JSONArray) g;
+                planGroups = (JSONArray) g;
             } else if (g instanceof String) {
                 String raw = ((String) g).trim();
                 if (raw.length() > 0) {
@@ -80,13 +82,13 @@ if (incomingJsonStr.length() > 0) {
                     for (int i = 0; i < parts.length; i++) {
                         String p = parts[i].trim();
                         if (p.length() > 0) {
-                            requestedGroups.put(p);
+                            planGroups.put(p);
                         }
                     }
                 }
             } else {
                 // single non-string value
-                requestedGroups.put(String.valueOf(g));
+                planGroups.put(String.valueOf(g));
             }
         }
     } catch (Exception parseEx) {
@@ -97,21 +99,21 @@ if (incomingJsonStr.length() > 0) {
             int lb = incomingJsonStr.indexOf('[', gIdx);
             int rb = incomingJsonStr.indexOf(']', lb);
             if (lb >= 0 && rb > lb) {
-                requestedGroups = new JSONArray(incomingJsonStr.substring(lb, rb + 1));
+                planGroups = new JSONArray(incomingJsonStr.substring(lb, rb + 1));
             }
         }
     }
 }
 
-log.info("[Hoop-BeforeRule] requestedGroups=" + requestedGroups.toString());
+log.info("[Hoop-BeforeRule] planGroups=" + planGroups.toString());
 
 // ---- 3) Status ONLY from Enable/Disable endpoints ----
 // Do NOT read "status":"active" from Add/Remove templates — that re-enables disabled users.
-String resolvedStatus = null;
+String hoopResolvedStatus = null;
 if (isDisable) {
-    resolvedStatus = "inactive";
+    hoopResolvedStatus = "inactive";
 } else if (isEnable) {
-    resolvedStatus = "active";
+    hoopResolvedStatus = "active";
 }
 // else entitlement op: preserve current status after GET
 
@@ -119,9 +121,9 @@ if (isDisable) {
 Map existingHeaders = requestEndPoint.getHeader();
 Object authHeader = (existingHeaders != null) ? existingHeaders.get("Authorization") : null;
 
-JSONArray currentGroups = new JSONArray();
-String currentName = email;
-String currentStatus = null;
+JSONArray hoopCurrentGroups = new JSONArray();
+String hoopCurrentName = email;
+String hoopCurrentStatus = null;
 
 CloseableHttpClient client = HttpClients.createDefault();
 CloseableHttpResponse resp = null;
@@ -133,12 +135,12 @@ try {
     get.setHeader("Accept", "application/json");
 
     resp = client.execute(get);
-    int status = resp.getStatusLine().getStatusCode();
+    int httpStatus = resp.getStatusLine().getStatusCode();
     String respBody = (resp.getEntity() != null) ? EntityUtils.toString(resp.getEntity()) : "";
-    log.debug("[Hoop-BeforeRule] GET status=" + status + " body=" + respBody);
+    log.debug("[Hoop-BeforeRule] GET status=" + httpStatus + " body=" + respBody);
 
-    if (status != 200) {
-        throw new RuntimeException("Hoop-BeforeRule GET failed status=" + status + " body=" + respBody);
+    if (httpStatus != 200) {
+        throw new RuntimeException("Hoop-BeforeRule GET failed status=" + httpStatus + " body=" + respBody);
     }
 
     JSONObject currentUserJson = new JSONObject(respBody);
@@ -151,15 +153,15 @@ try {
     }
 
     if (currentUserJson.has("groups") && !currentUserJson.isNull("groups")) {
-        currentGroups = currentUserJson.getJSONArray("groups");
+        hoopCurrentGroups = currentUserJson.getJSONArray("groups");
     }
     if (currentUserJson.has("name") && !currentUserJson.isNull("name")
             && currentUserJson.getString("name").trim().length() > 0) {
-        currentName = currentUserJson.getString("name");
+        hoopCurrentName = currentUserJson.getString("name");
     }
     if (currentUserJson.has("status") && !currentUserJson.isNull("status")
             && currentUserJson.getString("status").trim().length() > 0) {
-        currentStatus = currentUserJson.getString("status");
+        hoopCurrentStatus = currentUserJson.getString("status");
     }
 } finally {
     if (resp != null) {
@@ -168,49 +170,49 @@ try {
     try { client.close(); } catch (Exception ignore) {}
 }
 
-if (resolvedStatus == null) {
-    resolvedStatus = (currentStatus != null) ? currentStatus : "active";
-    log.info("[Hoop-BeforeRule] Preserving existing status=" + resolvedStatus);
+if (hoopResolvedStatus == null) {
+    hoopResolvedStatus = (hoopCurrentStatus != null) ? hoopCurrentStatus : "active";
+    log.info("[Hoop-BeforeRule] Preserving existing status=" + hoopResolvedStatus);
 } else {
-    log.info("[Hoop-BeforeRule] Setting status from enable/disable=" + resolvedStatus);
+    log.info("[Hoop-BeforeRule] Setting status from enable/disable=" + hoopResolvedStatus);
 }
 
 // ---- 5) Merge groups ----
-LinkedHashSet mergedSet = new LinkedHashSet();
-for (int i = 0; i < currentGroups.length(); i++) {
-    mergedSet.add(currentGroups.getString(i));
+LinkedHashSet hoopMergedSet = new LinkedHashSet();
+for (int i = 0; i < hoopCurrentGroups.length(); i++) {
+    hoopMergedSet.add(hoopCurrentGroups.getString(i));
 }
 
-if (isEntitlementOp && requestedGroups.length() > 0) {
+if (isEntitlementOp && planGroups.length() > 0) {
     if (isRemove) {
-        for (int i = 0; i < requestedGroups.length(); i++) {
-            mergedSet.remove(requestedGroups.getString(i));
+        for (int i = 0; i < planGroups.length(); i++) {
+            hoopMergedSet.remove(planGroups.getString(i));
         }
-        log.info("[Hoop-BeforeRule] REMOVE groups " + requestedGroups.toString());
+        log.info("[Hoop-BeforeRule] REMOVE groups " + planGroups.toString());
     } else {
-        for (int i = 0; i < requestedGroups.length(); i++) {
-            mergedSet.add(requestedGroups.getString(i));
+        for (int i = 0; i < planGroups.length(); i++) {
+            hoopMergedSet.add(planGroups.getString(i));
         }
-        log.info("[Hoop-BeforeRule] ADD groups " + requestedGroups.toString());
+        log.info("[Hoop-BeforeRule] ADD groups " + planGroups.toString());
     }
 } else if (isEntitlementOp) {
-    log.warn("[Hoop-BeforeRule] Entitlement op but no requested groups parsed - leaving groups unchanged");
+    log.warn("[Hoop-BeforeRule] Entitlement op but no plan groups parsed - leaving groups unchanged");
 } else {
     log.info("[Hoop-BeforeRule] Enable/Disable - preserving groups unchanged");
 }
 
-JSONArray finalGroups = new JSONArray();
-Iterator mi = mergedSet.iterator();
+JSONArray hoopFinalGroups = new JSONArray();
+Iterator mi = hoopMergedSet.iterator();
 while (mi.hasNext()) {
-    finalGroups.put(mi.next());
+    hoopFinalGroups.put(mi.next());
 }
 
 // ---- 6) Rewrite body ----
 JSONObject fullBody = new JSONObject();
 fullBody.put("email", email);
-fullBody.put("name", currentName);
-fullBody.put("status", resolvedStatus);
-fullBody.put("groups", finalGroups);
+fullBody.put("name", hoopCurrentName);
+fullBody.put("status", hoopResolvedStatus);
+fullBody.put("groups", hoopFinalGroups);
 
 String finalBodyStr = fullBody.toString();
 log.info("[Hoop-BeforeRule] finalBody=" + finalBodyStr);
@@ -221,6 +223,6 @@ wrapperBody.put("bodyFormat", "raw");
 requestEndPoint.setBody(wrapperBody);
 
 log.info("[Amlak-Rule-BeforeRule-Hoop] EXIT endpoint=" + endpointName
-    + " email=" + email + " status=" + resolvedStatus + " groups=" + finalGroups.toString());
+    + " email=" + email + " status=" + hoopResolvedStatus + " groups=" + hoopFinalGroups.toString());
 
 return requestEndPoint;
