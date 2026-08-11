@@ -1,0 +1,217 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!DOCTYPE Rule PUBLIC "sailpoint.dtd" "sailpoint.dtd">
+<!--
+  AfterProvisioning rule for Hoop application.
+
+  - Runs failure-notification helpers (non-blocking).
+  - After successful Create / Modify / Enable / Disable, refreshes the IIQ Link
+    by calling connector getObject (same as Single Account Aggregation) so
+    groups and status show immediately without a manual re-aggregate.
+  - Enable/Disable: falls back to status patch if getObject fails.
+-->
+<Rule language="beanshell" name="Amlak-Rule-Hoop-AfterProvisioningRule" type="AfterProvisioning">
+  <Description>
+    AfterProvisioning for Hoop: refresh Link groups/status via getObject after
+    successful Create/Modify/Enable/Disable so the cube UI does not require
+    manual Single Account Aggregation.
+  </Description>
+  <Signature returnType="Object">
+    <Inputs>
+      <Argument name="application">
+        <Description>The Application being provisioned.</Description>
+      </Argument>
+      <Argument name="plan">
+        <Description>The ProvisioningPlan that was executed.</Description>
+      </Argument>
+      <Argument name="result">
+        <Description>Overall ProvisioningResult for the plan.</Description>
+      </Argument>
+      <Argument name="identity">
+        <Description>Target Identity, when available.</Description>
+      </Argument>
+      <Argument name="project">
+        <Description>ProvisioningProject, when available.</Description>
+      </Argument>
+    </Inputs>
+  </Signature>
+  <Source><![CDATA[
+import org.apache.log4j.Logger;
+import sailpoint.object.Application;
+import sailpoint.object.Filter;
+import sailpoint.object.Link;
+import sailpoint.object.ProvisioningPlan;
+import sailpoint.object.ProvisioningPlan.AccountRequest;
+import sailpoint.object.ProvisioningResult;
+import sailpoint.object.QueryOptions;
+import sailpoint.object.ResourceObject;
+import sailpoint.object.Attributes;
+import sailpoint.connector.Connector;
+import sailpoint.connector.ConnectorFactory;
+import java.util.Iterator;
+import java.util.List;
+
+Logger log = Logger.getLogger("com.amlak.application.hoop");
+String RULE_NAME = "Amlak-Rule-Hoop-AfterProvisioningRule";
+log.info("Entering [" + RULE_NAME + "]");
+
+if (plan == null) {
+    log.warn("[" + RULE_NAME + "] ProvisioningPlan is NULL, skipping rule.");
+    return null;
+}
+
+// --- Notifications (wrapped so a failure here never blocks Link refresh) ---
+try {
+    processProvisioningFailureNotification(plan);
+} catch (Exception e) {
+    log.error("[" + RULE_NAME + "] processProvisioningFailureNotification failed: " + e.getMessage(), e);
+}
+
+try {
+    sendProvisioningFailureNotification(plan);
+} catch (Exception e) {
+    log.error("[" + RULE_NAME + "] sendProvisioningFailureNotification failed: " + e.getMessage(), e);
+}
+
+// --- Refresh Link from target after successful provisioning ---
+try {
+    String appName = (application != null) ? application.getName() : "Hoop";
+    List acctReqs = plan.getAccountRequests();
+
+    if (acctReqs == null || acctReqs.isEmpty()) {
+        log.debug("[" + RULE_NAME + "] No AccountRequests on plan, nothing to do.");
+    } else {
+        Connector connector = null;
+        try {
+            connector = ConnectorFactory.getConnector(application, null);
+        } catch (Exception connEx) {
+            log.error("[" + RULE_NAME + "] Could not get connector: " + connEx.getMessage(), connEx);
+        }
+
+        for (Iterator it = acctReqs.iterator(); it.hasNext();) {
+            AccountRequest acctReq = (AccountRequest) it.next();
+
+            String reqApp = acctReq.getApplication();
+            if (appName != null && reqApp != null && !appName.equals(reqApp)) {
+                continue;
+            }
+
+            AccountRequest.Operation op = acctReq.getOperation();
+            if (op == null) {
+                continue;
+            }
+            String opStr = op.toString();
+            String nativeIdentity = acctReq.getNativeIdentity();
+            log.debug("[" + RULE_NAME + "] AccountRequest op=" + opStr + " nativeIdentity=" + nativeIdentity);
+
+            // Refresh after ops that change target account state / entitlements
+            boolean shouldRefresh =
+                "Create".equals(opStr)
+                || "Modify".equals(opStr)
+                || "Enable".equals(opStr)
+                || "Disable".equals(opStr);
+
+            if (!shouldRefresh) {
+                continue;
+            }
+
+            ProvisioningResult acctResult = acctReq.getResult();
+            if (acctResult == null) {
+                acctResult = result;
+            }
+
+            boolean success = true;
+            if (acctResult != null && acctResult.getStatus() != null) {
+                success = ProvisioningResult.STATUS_COMMITTED.equals(acctResult.getStatus());
+            } else {
+                log.warn("[" + RULE_NAME + "] No ProvisioningResult for " + nativeIdentity
+                    + ", proceeding without status confirmation.");
+            }
+
+            if (!success) {
+                log.warn("[" + RULE_NAME + "] " + opStr + " did not commit for " + nativeIdentity
+                    + " (status=" + (acctResult != null ? acctResult.getStatus() : "null")
+                    + "), skipping Link refresh.");
+                continue;
+            }
+
+            if (nativeIdentity == null || nativeIdentity.trim().length() == 0) {
+                log.warn("[" + RULE_NAME + "] nativeIdentity empty, skip refresh.");
+                continue;
+            }
+
+            QueryOptions qo = new QueryOptions();
+            qo.addFilter(Filter.eq("application.name", appName));
+            qo.addFilter(Filter.eq("nativeIdentity", nativeIdentity));
+
+            List links = context.getObjects(Link.class, qo);
+            if (links == null || links.isEmpty()) {
+                log.warn("[" + RULE_NAME + "] No Link found for nativeIdentity=" + nativeIdentity);
+                continue;
+            }
+
+            Link link = (Link) links.get(0);
+            boolean refreshed = false;
+
+            // Preferred: Single Account Aggregation equivalent (Get Object)
+            if (connector != null) {
+                try {
+                    ResourceObject ro = connector.getObject(Connector.TYPE_ACCOUNT, nativeIdentity, null);
+                    if (ro != null && ro.getAttributes() != null) {
+                        Attributes attrs = ro.getAttributes();
+
+                        if (attrs.containsKey("groups")) {
+                            link.setAttribute("groups", attrs.get("groups"));
+                        }
+                        if (attrs.containsKey("status")) {
+                            link.setAttribute("status", attrs.get("status"));
+                        }
+                        if (attrs.containsKey("name")) {
+                            link.setAttribute("name", attrs.get("name"));
+                        }
+                        if (attrs.containsKey("email")) {
+                            link.setAttribute("email", attrs.get("email"));
+                        }
+                        if (attrs.containsKey("role")) {
+                            link.setAttribute("role", attrs.get("role"));
+                        }
+                        if (attrs.containsKey("id")) {
+                            link.setAttribute("id", attrs.get("id"));
+                        }
+
+                        context.saveObject(link);
+                        context.commitTransaction();
+                        refreshed = true;
+                        log.info("[" + RULE_NAME + "] Refreshed Link from getObject for "
+                            + nativeIdentity + " op=" + opStr
+                            + " groups=" + link.getAttribute("groups")
+                            + " status=" + link.getAttribute("status"));
+                    } else {
+                        log.warn("[" + RULE_NAME + "] getObject returned null/empty for " + nativeIdentity);
+                    }
+                } catch (Exception getEx) {
+                    log.error("[" + RULE_NAME + "] getObject refresh failed for " + nativeIdentity
+                        + ": " + getEx.getMessage(), getEx);
+                }
+            }
+
+            // Fallback for Enable/Disable only: patch status if getObject failed
+            if (!refreshed && ("Enable".equals(opStr) || "Disable".equals(opStr))) {
+                String newStatus = "Enable".equals(opStr) ? "active" : "inactive";
+                link.setAttribute("status", newStatus);
+                context.saveObject(link);
+                context.commitTransaction();
+                log.info("[" + RULE_NAME + "] Fallback set status=" + newStatus + " for " + nativeIdentity);
+            } else if (!refreshed) {
+                log.warn("[" + RULE_NAME + "] Link groups/status NOT refreshed for " + nativeIdentity
+                    + " — UI may need manual Single Account Aggregation until this is fixed.");
+            }
+        }
+    }
+} catch (Exception e) {
+    log.error("[" + RULE_NAME + "] Link refresh block failed: " + e.getMessage(), e);
+}
+
+log.info("Exiting [" + RULE_NAME + "]");
+return null;
+]]></Source>
+</Rule>

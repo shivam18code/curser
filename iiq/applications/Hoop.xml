@@ -6,9 +6,17 @@
   Base URL: https://hoopui-stg.pfa.amlakint.com
   Connector: Web Services v2
   BeforeOperation rule: Amlak-Rule-BeforeRule-Hoop
-    (attached to Add Entitlement, Remove Entitlement, Disable Account, Enable Account)
+    (Add Entitlement, Remove Entitlement, Disable Account, Enable Account)
   AfterOperation rule: Amlak-Rule-AfterRule-Hoop (Group Aggregation)
+  BeforeProvisioning: Amlak-Rule-Hoop-BeforeProvisioningRule
+  AfterProvisioning: Amlak-Rule-Hoop-AfterProvisioningRule
   Correlation: Amlak-Correlation-Hoop
+
+  Notes for Link refresh after Add/Remove:
+  - Modify endpoints include response attribute mapping (same as Get Object)
+    so IIQ can update the Link when Hoop PUT returns the user JSON.
+  - AfterProvisioningRule also refreshes the Link via connector getObject
+    after successful Enable/Disable/Modify (groups + status).
 
   SECURITY: accesstoken value redacted for repo storage.
   Re-enter OAuth credentials in IIQ after import; do not commit live tokens.
@@ -20,7 +28,7 @@
   <Attributes>
     <Map>
       <entry key="accesstoken" value="***REDACTED***"/>
-      <entry key="afterProvisioningRule"/>
+      <entry key="afterProvisioningRule" value="Amlak-Rule-Hoop-AfterProvisioningRule"/>
       <entry key="aggregationPartitioned">
         <value>
           <Boolean></Boolean>
@@ -28,7 +36,7 @@
       </entry>
       <entry key="aggregationType" value="account"/>
       <entry key="authenticationMethod" value="OAuthLogin"/>
-      <entry key="beforeProvisioningRule"/>
+      <entry key="beforeProvisioningRule" value="Amlak-Rule-Hoop-BeforeProvisioningRule"/>
       <entry key="clientCertAuthEnabled">
         <value>
           <Boolean></Boolean>
@@ -213,8 +221,19 @@
                 </value>
               </entry>
               <entry key="parentEndpointName"/>
-              <entry key="resMappingObj"/>
-              <entry key="rootPath"/>
+              <entry key="resMappingObj">
+                <value>
+                  <Map>
+                    <entry key="email" value="email"/>
+                    <entry key="groups" value="groups"/>
+                    <entry key="id" value="id"/>
+                    <entry key="name" value="name"/>
+                    <entry key="role" value="role"/>
+                    <entry key="status" value="status"/>
+                  </Map>
+                </value>
+              </entry>
+              <entry key="rootPath" value="$"/>
               <entry key="sequenceNumberForEndpoint" value="4"/>
               <entry key="uniqueNameForEndPoint" value="Create Account"/>
               <entry key="xpathNamespaces"/>
@@ -227,7 +246,7 @@
                   <Map>
                     <entry key="bodyFormData"/>
                     <entry key="bodyFormat" value="raw"/>
-                    <entry key="jsonBody" value="{&#xD;&#xA;  &quot;status&quot;: &quot;active&quot;,&#xD;&#xA;  &quot;groups&quot;: $plan.groups$&#xD;&#xA;}"/>
+                    <entry key="jsonBody" value="{&#xD;&#xA;  &quot;groups&quot;: $plan.groups$&#xD;&#xA;}"/>
                   </Map>
                 </value>
               </entry>
@@ -254,10 +273,22 @@
                 </value>
               </entry>
               <entry key="parentEndpointName"/>
-              <entry key="resMappingObj"/>
-              <entry key="rootPath"/>
+              <!-- Response mapping: refresh Link attrs when PUT returns user JSON -->
+              <entry key="resMappingObj">
+                <value>
+                  <Map>
+                    <entry key="email" value="email"/>
+                    <entry key="groups" value="groups"/>
+                    <entry key="id" value="id"/>
+                    <entry key="name" value="name"/>
+                    <entry key="role" value="role"/>
+                    <entry key="status" value="status"/>
+                  </Map>
+                </value>
+              </entry>
+              <entry key="rootPath" value="$"/>
               <entry key="sequenceNumberForEndpoint" value="5"/>
-              <!-- NOTE: typo preserved from live app config ("Entitilement") -->
+              <!-- Typo preserved from live app ("Entitilement") -->
               <entry key="uniqueNameForEndPoint" value="Add Entitilement"/>
               <entry key="xpathNamespaces"/>
             </Map>
@@ -269,7 +300,7 @@
                   <Map>
                     <entry key="bodyFormData"/>
                     <entry key="bodyFormat" value="raw"/>
-                    <entry key="jsonBody" value="{&#xD;&#xA;  &quot;status&quot;: &quot;active&quot;,&#xD;&#xA;  &quot;groups&quot;: $plan.groups$&#xD;&#xA;}"/>
+                    <entry key="jsonBody" value="{&#xD;&#xA;  &quot;groups&quot;: $plan.groups$&#xD;&#xA;}"/>
                   </Map>
                 </value>
               </entry>
@@ -296,8 +327,19 @@
                 </value>
               </entry>
               <entry key="parentEndpointName"/>
-              <entry key="resMappingObj"/>
-              <entry key="rootPath"/>
+              <entry key="resMappingObj">
+                <value>
+                  <Map>
+                    <entry key="email" value="email"/>
+                    <entry key="groups" value="groups"/>
+                    <entry key="id" value="id"/>
+                    <entry key="name" value="name"/>
+                    <entry key="role" value="role"/>
+                    <entry key="status" value="status"/>
+                  </Map>
+                </value>
+              </entry>
+              <entry key="rootPath" value="$"/>
               <entry key="sequenceNumberForEndpoint" value="6"/>
               <entry key="uniqueNameForEndPoint" value="Remove Entitlement"/>
               <entry key="xpathNamespaces"/>
@@ -337,8 +379,19 @@
                 </value>
               </entry>
               <entry key="parentEndpointName"/>
-              <entry key="resMappingObj"/>
-              <entry key="rootPath"/>
+              <entry key="resMappingObj">
+                <value>
+                  <Map>
+                    <entry key="email" value="email"/>
+                    <entry key="groups" value="groups"/>
+                    <entry key="id" value="id"/>
+                    <entry key="name" value="name"/>
+                    <entry key="role" value="role"/>
+                    <entry key="status" value="status"/>
+                  </Map>
+                </value>
+              </entry>
+              <entry key="rootPath" value="$"/>
               <entry key="sequenceNumberForEndpoint" value="7"/>
               <entry key="uniqueNameForEndPoint" value="Disable Account"/>
               <entry key="xpathNamespaces"/>
@@ -378,8 +431,19 @@
                 </value>
               </entry>
               <entry key="parentEndpointName"/>
-              <entry key="resMappingObj"/>
-              <entry key="rootPath"/>
+              <entry key="resMappingObj">
+                <value>
+                  <Map>
+                    <entry key="email" value="email"/>
+                    <entry key="groups" value="groups"/>
+                    <entry key="id" value="id"/>
+                    <entry key="name" value="name"/>
+                    <entry key="role" value="role"/>
+                    <entry key="status" value="status"/>
+                  </Map>
+                </value>
+              </entry>
+              <entry key="rootPath" value="$"/>
               <entry key="sequenceNumberForEndpoint" value="8"/>
               <entry key="uniqueNameForEndPoint" value="Enable Account"/>
               <entry key="xpathNamespaces"/>
@@ -425,8 +489,7 @@
                     <entry key="email" value="email"/>
                     <entry key="groups" value="groups"/>
                     <entry key="id" value="id"/>
-                    <!-- BUG: schema key has trailing space "name " — should be "name" -->
-                    <entry key="name " value="name"/>
+                    <entry key="name" value="name"/>
                     <entry key="role" value="role"/>
                     <entry key="status" value="status"/>
                   </Map>
@@ -446,7 +509,7 @@
         </value>
       </entry>
       <entry key="enableHasMore" value="true"/>
-      <entry key="enableStatus"/>
+      <entry key="enableStatus" value="status=active"/>
       <entry key="encrypted" value="accesstoken,refresh_token,oauth_token_info,client_secret,private_key,private_key_password,clientCertificate,clientKeySpec,resourceOwnerPassword,custom_auth_token_info"/>
       <entry key="fixedPlanMultivaluedAttribute" value="true"/>
       <entry key="genericWebServiceBaseUrl" value="https://hoopui-stg.pfa.amlakint.com"/>
@@ -557,15 +620,29 @@ return (first + " " + last).trim();</Source>
   </ProvisioningForms>
   <Schemas>
     <Schema displayAttribute="name" groupAttribute="" identityAttribute="email" instanceAttribute="" nativeObjectType="user" objectType="account">
-      <AttributeDefinition name="id" type="string"/>
-      <AttributeDefinition name="name" type="string"/>
-      <AttributeDefinition name="email" type="string"/>
-      <AttributeDefinition name="status" type="string"/>
-      <AttributeDefinition name="role" type="string"/>
-      <AttributeDefinition entitlement="true" managed="true" minable="true" multi="true" name="groups" schemaObjectType="group" type="string"/>
+      <AttributeDefinition name="id" type="string">
+        <Description></Description>
+      </AttributeDefinition>
+      <AttributeDefinition name="name" type="string">
+        <Description></Description>
+      </AttributeDefinition>
+      <AttributeDefinition name="email" type="string">
+        <Description></Description>
+      </AttributeDefinition>
+      <AttributeDefinition name="status" type="string">
+        <Description></Description>
+      </AttributeDefinition>
+      <AttributeDefinition name="role" type="string">
+        <Description></Description>
+      </AttributeDefinition>
+      <AttributeDefinition entitlement="true" managed="true" minable="true" multi="true" name="groups" schemaObjectType="group" type="string">
+        <Description></Description>
+      </AttributeDefinition>
     </Schema>
     <Schema descriptionAttribute="" displayAttribute="group" identityAttribute="group" instanceAttribute="" nativeObjectType="group" objectType="group">
-      <AttributeDefinition entitlement="true" minable="true" multi="true" name="group" schemaObjectType="group" type="string"/>
+      <AttributeDefinition entitlement="true" minable="true" multi="true" name="group" schemaObjectType="group" type="string">
+        <Description></Description>
+      </AttributeDefinition>
     </Schema>
   </Schemas>
 </Application>

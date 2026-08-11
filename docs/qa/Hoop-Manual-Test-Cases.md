@@ -13,6 +13,24 @@ Use this document for manual QA of aggregation and provisioning against Hoop. Ma
 
 ---
 
+## Troubleshooting: `GET failed status=404` on Add Entitlement
+
+**Error (old rule):**
+```text
+Error executing before operation rule for endpoint 'Add Entitilement':
+Hoop-BeforeRule GET failed status=404 body={"message":"user ... not found"}
+```
+
+| Cause | What to do |
+|-------|------------|
+| IIQ sent **Modify / Add Entitlement** but Hoop has **no user** yet | Import updated BeforeRule (Add+404 bootstraps `POST /api/users`). Re-run the request. |
+| IIQ link `nativeIdentity` is wrong / shows as `???` | Fix the account link so nativeIdentity = real Hoop email, then retry. |
+| You only need access on an existing user | Confirm email with `GET /api/users/{email}` in Hoop; create via Create Account if missing. |
+
+Log markers after fix: `bootstrapping Create`, `Switched endpoint to Create POST`, `bootstrapCreate=true`.
+
+---
+
 ## 0. Prerequisites
 
 | # | Check | Expected |
